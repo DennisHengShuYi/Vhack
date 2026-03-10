@@ -1,0 +1,61 @@
+T+02:00 [CHARGE] [ALPHA-4] [CHARGING] ALPHA-4: 35%
+T+02:00 [CHARGE] [ALPHA-1] [BATTERY] ALPHA-1 fully charged. Ready for deployment. Cycles: 171
+T+02:00 [CHARGE] [ALPHA-4] [CHARGING] ALPHA-4: 60%
+T+02:01 [AI] [] ?ß† [SENTINEL] Planning tick ‚?? querying Gemini 2.5 Flash...
+T+02:01 [WARN] [] ‚ù? [SENTINEL] Error: 404 models/gemini-1.5-flash is not found for API version v1beta, or is not supported for generateCon. Fallback.
+T+02:01 [INFO] [] ?§? [RULE-BASED] Plan: ALPHA-1‚??(0,6), ALPHA-3‚??(0,0)
+T+02:01 [WARN] [ALPHA-3] ?™´ ALPHA-3 battery 22% ‚?? RTB forced!
+T+02:01 [CHARGE] [ALPHA-4] [CHARGING] ALPHA-4: 85%
+T+02:02 [CHARGE] [ALPHA-4] [BATTERY] ALPHA-4 fully charged. Ready for deployment. Cycles: 1
+T+02:03 [CHARGE] [ALPHA-4] [BATTERY] ALPHA-4 fully charged. Ready for deployment. Cycles: 2
+T+02:03 [CHARGE] [ALPHA-4] [BATTERY] ALPHA-4 fully charged. Ready for deployment. Cycles: 3
+T+02:04 [CHARGE] [ALPHA-4] [BATTERY] ALPHA-4 fully charged. Ready for deployment. Cycles: 4
+T+02:05 [CHARGE] [ALPHA-3] [CHARGING] ALPHA-3: 39%
+T+02:05 [CHARGE] [ALPHA-4] [BATTERY] ALPHA-4 fully charged. Ready for deployment. Cycles: 5
+T+02:05 [CHARGE] [ALPHA-3] [CHARGING] ALPHA-3: 64%
+T+02:05 [CHARGE] [ALPHA-4] [BATTERY] ALPHA-4 fully charged. Ready for deployment. Cycles: 6
+T+02:06 [CHARGE] [ALPHA-3] [CHARGING] ALPHA-3: 89%
+T+02:06 [CHARGE] [ALPHA-4] [BATTERY] ALPHA-4 fully charged. Ready for deployment. Cycles: 7
+T+02:07 [CHARGE] [ALPHA-3] [BATTERY] ALPHA-3 fully charged. Ready for deployment. Cycles: 1
+T+02:07 [CHARGE] [ALPHA-4] [BATTERY] ALPHA-4 fully charged. Ready for deployment. Cycles: 8
+T+02:08 [AI] [] ?ß† [SENTINEL] Planning tick ‚?? querying Gemini 2.5 Flash...
+T+02:08 [WARN] [] ‚ù? [SENTINEL] Error: 404 models/gemini-1.5-flash is not found for API version v1beta, or is not supported for generateCon. Fallback.
+T+02:08 [INFO] [] ?§? [RULE-BASED] Plan: ALPHA-1‚??(1,6), ALPHA-3‚??(2,5), ALPHA-4‚??(0,7)
+T+02:14 [AI] [] ?ß† [SENTINEL] Planning tick ‚?? querying Gemini 2.5 Flash...
+T+02:14 [WARN] [] ‚ù? [SENTINEL] Error: 404 models/gemini-1.5-flash is not found for API version v1beta, or is not supported for generateCon. Fallback.
+T+02:14 [INFO] [] ?§? [RULE-BASED] Plan: ALPHA-1‚??(2,6), ALPHA-3‚??(3,5), ALPHA-4‚??(1,7)
+T+02:20 [AI] [] ?ß† [SENTINEL] Planning tick ‚?? querying Gemini 2.5 Flash...
+T+02:20 [WARN] [] ‚ù? [SENTINEL] Error: 404 models/gemini-1.5-flash is not found for API version v1beta, or is not supported for generateCon. Fallback.
+T+02:20 [INFO] [] ?§? [RULE-BASED] Plan: ALPHA-1‚??(3,6), ALPHA-3‚??(4,5), ALPHA-4‚??(2,7)
+T+02:27 [AI] [] ?ß† [SENTINEL] Planning tick ‚?? querying Gemini 2.5 Flash...
+T+02:27 [WARN] [] ‚ù? [SENTINEL] Error: 404 models/gemini-1.5-flash is not found for API version v1beta, or is not supported for generateCon. Fallback.
+T+02:27 [INFO] [] ?§? [RULE-BASED] Plan: ALPHA-1‚??(4,6), ALPHA-3‚??(5,5), ALPHA-4‚??(3,7)
+T+02:33 [AI] [] ?ß† [SENTINEL] Planning tick ‚?? querying Gemini 2.5 Flash...
+T+02:33 [WARN] [] ‚ù? [SENTINEL] Error: 404 models/gemini-1.5-flash is not found for API version v1beta, or is not supported for generateCon. Fallback.
+T+02:33 [INFO] [] ?§? [RULE-BASED] Plan: ALPHA-1‚??(5,6), ALPHA-3‚??(6,6), ALPHA-4‚??(4,7)
+T+02:40 [AI] [] ?ß† [SENTINEL] Planning tick ‚?? querying Gemini 2.5 Flash...
+T+02:40 [WARN] [] ‚ù? [SENTINEL] Error: 404 models/gemini-1.5-flash is not found for API version v1beta, or is not supported for generateCon. Fallback.
+T+02:40 [INFO] [] ?§? [RULE-BASED] Plan: ALPHA-1‚??(5,7), ALPHA-3‚??(7,6), ALPHA-4‚??(4,8)
+T+02:40 [CRITICAL] [ALPHA-3] [CRITICAL] THERMAL MATCH at (7,6)! CNN Confidence: 88% | Triage: P1-CRITICAL | Report: [Medical emergency ‚?? unconscious person] - DRONE ON STANDBY.
+T+02:46 [AI] [] ?ß† [SENTINEL] Planning tick ‚?? querying Gemini 2.5 Flash...
+T+02:46 [WARN] [] ‚ù? [SENTINEL] Error: 404 models/gemini-1.5-flash is not found for API version v1beta, or is not supported for generateCon. Fallback.
+T+02:46 [INFO] [] ?§? [RULE-BASED] Plan: ALPHA-1‚??(6,7), ALPHA-4‚??(3,8)
+T+02:46 [CRITICAL] [ALPHA-4] [CRITICAL] THERMAL MATCH at (3,8)! CNN Confidence: 86% | Triage: P1-CRITICAL | Report: [Medical emergency ‚?? unconscious person] - DRONE ON STANDBY.
+T+02:52 [AI] [] ?ß† [SENTINEL] Planning tick ‚?? querying Gemini 2.5 Flash...
+T+02:52 [WARN] [] ‚ù? [SENTINEL] Error: 404 models/gemini-1.5-flash is not found for API version v1beta, or is not supported for generateCon. Fallback.
+T+02:52 [INFO] [] ?§? [RULE-BASED] Plan: ALPHA-1‚??(7,7)
+T+02:59 [AI] [] ?ß† [SENTINEL] Planning tick ‚?? querying Gemini 2.5 Flash...
+T+02:59 [WARN] [] ‚ù? [SENTINEL] Error: 404 models/gemini-1.5-flash is not found for API version v1beta, or is not supported for generateCon. Fallback.
+T+02:59 [INFO] [] ?§? [RULE-BASED] Plan: ALPHA-1‚??(8,7)
+T+03:05 [AI] [] ?ß† [SENTINEL] Planning tick ‚?? querying Gemini 2.5 Flash...
+T+03:05 [WARN] [] ‚ù? [SENTINEL] Error: 404 models/gemini-1.5-flash is not found for API version v1beta, or is not supported for generateCon. Fallback.
+T+03:05 [INFO] [] ?§? [RULE-BASED] Plan: ALPHA-1‚??(8,6)
+T+03:11 [AI] [] ?ß† [SENTINEL] Planning tick ‚?? querying Gemini 2.5 Flash...
+T+03:11 [WARN] [] ‚ù? [SENTINEL] Error: 404 models/gemini-1.5-flash is not found for API version v1beta, or is not supported for generateCon. Fallback.
+T+03:11 [INFO] [] ?§? [RULE-BASED] Plan: ALPHA-1‚??(9,6)
+T+03:11 [CRITICAL] [ALPHA-1] [CRITICAL] THERMAL MATCH at (9,6)! CNN Confidence: 85% | Triage: P2-URGENT | Report: [Survivor with broken leg near wall] - DRONE ON STANDBY.
+T+03:18 [AI] [] ?ß† [SENTINEL] Planning tick ‚?? querying Gemini 2.5 Flash...
+T+03:18 [WARN] [] ‚ù? [SENTINEL] Error: 404 models/gemini-1.5-flash is not found for API version v1beta, or is not supported for generateCon. Fallback.
+T+03:24 [AI] [] ?ß† [SENTINEL] Planning tick ‚?? querying Gemini 2.5 Flash...
+T+03:24 [WARN] [] ‚ù? [SENTINEL] Error: 404 models/gemini-1.5-flash is not found for API version v1beta, or is not supported for generateCon. Fallback.
+
