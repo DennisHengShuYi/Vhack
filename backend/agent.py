@@ -13,19 +13,17 @@ import json
 import traceback
 from typing import Dict, List, Any, Optional
 
-import google.generativeai as genai
-from dotenv import load_dotenv
-
+import llm_gateway as litellm
 import shared
 from simulation import LOW_BATTERY_THRESHOLD
+from dotenv import load_dotenv
 
-# ─── Load API Key ─────────────────────────────────────────────────────────────
+# ─── Load Environment ─────────────────────────────────────────────────────────
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
-GEMINI_KEY = os.getenv("GEMINI_KEY", "")
-MODEL_NAME = "gemini-2.5-flash"  # Custom 2.5 Flash version for this test
 
-if GEMINI_KEY:
-    genai.configure(api_key=GEMINI_KEY)
+# Fallback compatibility for older key format
+if os.getenv("GEMINI_KEY") and not os.getenv("GEMINI_API_KEY"):
+    os.environ["GEMINI_API_KEY"] = os.getenv("GEMINI_KEY", "")
 
 SYSTEM_INSTRUCTION = """
 You are SENTINEL - the AI Command Agent for a 5-drone rescue swarm operating on a 10x10 disaster grid.
@@ -67,7 +65,8 @@ After the COT block, output this exact JSON:
 def _build_planning_prompt(state: Dict[str, Any]) -> str:
     """Build a structured prompt from the current swarm state."""
     stats = state["stats"]
-    unscanned = state.get("unscanned", [])[:25]  # sample for prompt
+    unscanned_raw = state.get("unscanned", [])
+    unscanned = [unscanned_raw[i] for i in range(min(25, len(unscanned_raw)))]  # sample for prompt
     waiting_drones = [
         d for d in state["drones"] if d["is_waiting_response"]
     ]
@@ -138,28 +137,22 @@ class CommandAgent:
     """Central Command Agent — uses Gemini 2.5 Flash for swarm orchestration."""
 
     def __init__(self):
-        self.model: Optional[Any] = None
         self.llm_active = False
+        self.llm_model = os.getenv("LLM_MODEL", "gemini/gemini-2.5-flash")
         self._init_model()
 
     def _init_model(self):
-        if not GEMINI_KEY:
-            shared.sim.log(
-                "⚠️  No GEMINI_KEY — switching to rule-based fallback planner.", "WARN"
-            )
+        provider = self.llm_model.split("/")[0] if "/" in self.llm_model else "gemini"
+        
+        if provider == "gemini" and not os.getenv("GEMINI_API_KEY"):
+            shared.sim.log("⚠️  No GEMINI_API_KEY — switching to rule-based fallback planner.", "WARN")
             return
-        try:
-            self.model = genai.GenerativeModel(
-                model_name=MODEL_NAME,
-                system_instruction=SYSTEM_INSTRUCTION,
-            )
-            self.llm_active = True
-            shared.sim.log(
-                f"SENTINEL AI ONLINE - Gemini 2.5 Flash ({MODEL_NAME})", "AI"
-            )
-        except Exception as e:
-            shared.sim.log(f"⚠️  Gemini init failed: {e}. Rule-based mode.", "WARN")
-            self.llm_active = False
+        if provider == "openai" and not os.getenv("OPENAI_API_KEY"):
+            shared.sim.log("⚠️  No OPENAI_API_KEY — switching to rule-based fallback planner.", "WARN")
+            return
+            
+        self.llm_active = True
+        shared.sim.log(f"SENTINEL AI ONLINE - LiteLLM Router ({self.llm_model})", "AI")
 
     async def plan(self) -> Dict[str, List[int]]:
         """
@@ -169,28 +162,38 @@ class CommandAgent:
         state = shared.sim.get_status()
         state["unscanned"] = shared.sim.get_unscanned_cells()
 
-        if self.llm_active and self.model:
+        if self.llm_active:
             try:
                 prompt = _build_planning_prompt(state)
-                shared.sim.log("🧠 [SENTINEL] Planning tick — querying Gemini 2.5 Flash...", "AI")
+                shared.sim.log(f"🧠 [SENTINEL] Planning tick — querying {self.llm_model}...", "AI")
 
+                messages = [
+                    {"role": "system", "content": SYSTEM_INSTRUCTION},
+                    {"role": "user", "content": prompt}
+                ]
                 response = await asyncio.wait_for(
-                    asyncio.to_thread(lambda: self.model.generate_content(prompt)),
+                    asyncio.to_thread(litellm.completion, model=self.llm_model, messages=messages),
                     timeout=20.0,
                 )
-                text = response.text.strip()
+                text = str(response.choices[0].message.content).strip()
 
                 # ── Extract and log Chain-of-Thought block ──────────────────
                 if "[COT]" in text and "[/COT]" in text:
                     cot_start = text.index("[COT]") + len("[COT]")
                     cot_end = text.index("[/COT]")
-                    cot_content = text[cot_start:cot_end].strip()
-                    for line in cot_content.split("\n"):
+                    cot_content = ""
+                    for i in range(cot_start, cot_end):
+                        cot_content += text[i]
+                    cot_content = cot_content.strip()
+                    lines = cot_content.split("\n")
+                    for line in lines:
                         if line.strip():
                             shared.sim.log(f"🧠 REASONING: {line.strip()}", "AI")
                 else:
                     # Generic logging if tags missing
-                    for line in text.split("\n")[:5]:
+                    lines = text.split("\n")
+                    for i in range(min(5, len(lines))):
+                        line = lines[i]
                         if line.strip() and not line.strip().startswith("{"):
                             shared.sim.log(f"🧠 AI LOGIC: {line.strip()}", "AI")
 
@@ -218,8 +221,10 @@ class CommandAgent:
             except json.JSONDecodeError as e:
                 shared.sim.log(f"⚠️  [SENTINEL] JSON parse error: {e}. Fallback.", "WARN")
             except Exception as e:
+                err_msg = str(e)
+                err_trunc = "".join(err_msg[i] for i in range(min(100, len(err_msg))))
                 shared.sim.log(
-                    f"❌ [SENTINEL] Error: {str(e)[:100]}. Fallback.", "WARN"
+                    f"❌ [SENTINEL] Error: {err_trunc}. Fallback.", "WARN"
                 )
                 traceback.print_exc()
 
@@ -229,7 +234,7 @@ class CommandAgent:
         """Deterministic fallback planner — always produces a valid assignment."""
         sim = shared.sim
         assignments: Dict[str, List[int]] = {}
-        unscanned = sim.get_unscanned_cells()
+        unscanned: List[List[int]] = sim.get_unscanned_cells()
         used_targets: set = set()
 
         for drone in sim.drones.values():
@@ -249,13 +254,14 @@ class CommandAgent:
                 available = [c for c in unscanned if tuple(c) not in used_targets]
                 if not available:
                     available = unscanned
-                target = min(
+                best_target = min(
                     available,
                     key=lambda c: abs(c[0] - drone.x) + abs(c[1] - drone.y),
                 )
-                assignments[drone.id] = target
-                used_targets.add(tuple(target))
-                sim.log(f"🤖 [ROUTING] {drone.id} moving to ({target[0]},{target[1]}) - nearest unscanned cell.", "INFO", drone.id)
+                assignments[drone.id] = list(best_target)
+                used_targets.add(tuple(best_target))
+                tx, ty = assignments[drone.id][0], assignments[drone.id][1]
+                sim.log(f"🤖 [ROUTING] {drone.id} moving to ({tx},{ty}) - nearest unscanned cell.", "INFO", drone.id)
             else:
                 assignments[drone.id] = [0, 0]
 

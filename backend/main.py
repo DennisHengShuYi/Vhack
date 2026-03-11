@@ -26,6 +26,9 @@ from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 
+if os.getenv("GEMINI_KEY") and not os.getenv("GEMINI_API_KEY"):
+    os.environ["GEMINI_API_KEY"] = os.getenv("GEMINI_KEY", "")
+
 import shared
 from agent import CommandAgent
 from simulation import BATTERY_DRAIN_MOVE, LOW_BATTERY_THRESHOLD, SimulationState
@@ -51,10 +54,12 @@ class MissionManager:
         AI_PLAN_INTERVAL = 6.0   # Gemini planning every 6s
         SIM_TICK = 0.7            # Simulation physics every 0.7s
 
-        step = 0
+        step_count: int = 0
         max_steps = 3000  # hard cap
 
-        while sim.mission_active and step < max_steps:
+        while sim.mission_active:
+            if step_count >= max_steps:
+               break
             sim = shared.sim  # re-reference after potential reset
 
             # ── Mission Completion ────────────────────────────────────────
@@ -93,7 +98,9 @@ class MissionManager:
                                     drone.returning_to_base = False
                                     drone.mission_complete_rtb = False
                 except Exception as e:
-                    sim.log(f"Planning error: {str(e)[:80]}", "ERROR")
+                    err_str = str(e)
+                    err_trunc = "".join(err_str[k] for k in range(min(80, len(err_str))))
+                    sim.log(f"Planning error: {err_trunc}", "ERROR")
 
             # ── Loop A: Simulation Tick ───────────────────────────────────
             for d_id, drone in list(sim.drones.items()):
@@ -174,8 +181,8 @@ class MissionManager:
 
                 # Track path history
                 drone.path_history.append([nx, ny])
-                if len(drone.path_history) > 12:
-                    drone.path_history = drone.path_history[-12:]
+                while len(drone.path_history) > 12:
+                    drone.path_history.pop(0)
 
                 # Low battery threshold — force RTB
                 if drone.battery < LOW_BATTERY_THRESHOLD and not drone.returning_to_base:
@@ -190,7 +197,7 @@ class MissionManager:
                     sim.scan(d_id)
 
             await asyncio.sleep(SIM_TICK)
-            step += 1
+            step_count += 1
 
         sim.mission_active = False
         sim.log("═══ SWARM DISENGAGED ═══", "INFO")
@@ -264,10 +271,8 @@ async def victim_response(drone_id: str, operator_message: Optional[str] = None)
     if operator_message and operator_message.strip():
         sim.log(f"🎙️ VERBAL INPUT: \"{operator_message}\"", "VERBAL", drone_id)
         try:
-            import google.generativeai as genai
+            import llm_gateway as litellm
             import json
-            
-            p_model = genai.GenerativeModel("gemini-2.5-flash")
             
             # Request parsing of coordinates or location clues
             parse_prompt = (
@@ -282,13 +287,17 @@ async def victim_response(drone_id: str, operator_message: Optional[str] = None)
             )
             
             p_resp = await asyncio.wait_for(
-                asyncio.to_thread(lambda: p_model.generate_content(parse_prompt)),
+                asyncio.to_thread(
+                    litellm.completion, 
+                    model=os.getenv("LLM_MODEL", "gemini/gemini-2.5-flash"), 
+                    messages=[{"role": "user", "content": parse_prompt}]
+                ),
                 timeout=12.0,
             )
             
             try:
-                # Basic JSON cleaning (Gemini 1.5 might include markdown blocks)
-                json_str = p_resp.text.strip().replace("```json", "").replace("```", "").strip()
+                # Basic JSON cleaning
+                json_str = p_resp.choices[0].message.content.strip().replace("```json", "").replace("```", "").strip()
                 data = json.loads(json_str)
                 if data.get("target"):
                     tx, ty = data["target"]
@@ -299,18 +308,18 @@ async def victim_response(drone_id: str, operator_message: Optional[str] = None)
                 print(f"JSON Parse error from speech extraction: {je}")
 
             # Also do standard medical triage for the CURRENT victim
-            triage_model = genai.GenerativeModel("gemini-2.5-flash")
             victim_ctx = drone.victim_report or "Unknown situation"
+            triage_prompt = f"EMERGENCY TRIAGE. Case: '{victim_ctx}'. Victim said: '{operator_message}'. Give exactly ONE sentence: triage priority (P1/P2/P3) and next action."
+            
             resp = await asyncio.wait_for(
                 asyncio.to_thread(
-                    lambda: triage_model.generate_content(
-                        f"EMERGENCY TRIAGE. Case: '{victim_ctx}'. Victim said: '{operator_message}'. "
-                        "Give exactly ONE sentence: triage priority (P1/P2/P3) and next action."
-                    )
+                    litellm.completion,
+                    model=os.getenv("LLM_MODEL", "gemini/gemini-2.5-flash"),
+                    messages=[{"role": "user", "content": triage_prompt}]
                 ),
                 timeout=10.0,
             )
-            sim.log(f"TRIAGE AI: {resp.text.strip()}", "AI", drone_id)
+            sim.log(f"TRIAGE AI: {resp.choices[0].message.content.strip()}", "AI", drone_id)
         except Exception as e:
             sim.log(f"Comms processing error: {e}", "ERROR", drone_id)
 
@@ -342,10 +351,8 @@ async def voice_command(message: str):
     sim.log(f"🎙️ GLOBAL VOICE: '{message}'", "VERBAL")
     
     try:
-        import google.generativeai as genai
+        import llm_gateway as litellm
         import json
-        
-        p_model = genai.GenerativeModel("gemini-2.5-flash")
         
         # Grid is 10x10 (0-9, 0-9). 
         # Help Gemini understand the user might say "grid 10" or "sector 5"
@@ -361,11 +368,15 @@ async def voice_command(message: str):
         )
         
         p_resp = await asyncio.wait_for(
-            asyncio.to_thread(lambda: p_model.generate_content(parse_prompt)),
+            asyncio.to_thread(
+                litellm.completion, 
+                model=os.getenv("LLM_MODEL", "gemini/gemini-2.5-flash"), 
+                messages=[{"role": "user", "content": parse_prompt}]
+            ),
             timeout=12.0,
         )
         
-        json_str = p_resp.text.strip().replace("```json", "").replace("```", "").strip()
+        json_str = p_resp.choices[0].message.content.strip().replace("```json", "").replace("```", "").strip()
         data = json.loads(json_str)
         
         if data.get("target"):
@@ -375,7 +386,7 @@ async def voice_command(message: str):
             reason = data.get("reason", "Voice instruction")
             
             # Find closest available drone
-            best_drone = None
+            best_drone: Optional[Any] = None
             min_dist = 999
             
             for drone in sim.drones.values():
@@ -387,7 +398,7 @@ async def voice_command(message: str):
                     min_dist = dist
                     best_drone = drone
             
-            if best_drone:
+            if best_drone is not None:
                 best_drone.original_pos = [best_drone.x, best_drone.y]
                 best_drone.target_x, best_drone.target_y = tx, ty
                 best_drone.voice_override = True

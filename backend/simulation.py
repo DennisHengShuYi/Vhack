@@ -121,9 +121,10 @@ class SimulationState:
     # ─── Utilities ───────────────────────────────────────────────────────────
 
     def _ts(self) -> str:
-        if not self.mission_start_time:
+        mt = self.mission_start_time
+        if mt is None:
             return "T+00:00"
-        e = int(time.time() - self.mission_start_time)
+        e = int(time.time() - float(mt))
         m, s = divmod(e, 60)
         return f"T+{m:02d}:{s:02d}"
 
@@ -166,7 +167,8 @@ class SimulationState:
                     if 0 <= ry < 5 and 0 <= rx < 5:
                         dist = math.sqrt(dx**2 + dy**2)
                         heat = int(intensity * math.exp(-0.5 * dist))
-                        matrix[ry][rx] = max(matrix[ry][rx], heat)
+                        if heat > matrix[ry][rx]:
+                            matrix[ry][rx] = heat
         return matrix
 
     # ─── MCP Tool Implementations ────────────────────────────────────────────
@@ -206,8 +208,8 @@ class SimulationState:
                          self.log(f"Survivor {s['id']} guided safely to base station!", "SUCCESS", drone_id)
 
         drone.path_history.append([x, y])
-        if len(drone.path_history) > 15:
-            drone.path_history = drone.path_history[-15:]
+        while len(drone.path_history) > 15:
+            drone.path_history.pop(0)
         msg = f"Moved {drone_id} ({old_x},{old_y})→({x},{y}) | Battery: {drone.battery:.0f}%"
         self.log(msg, "MOVE", drone_id)
         return msg
@@ -385,7 +387,7 @@ class SimulationState:
             for y in range(GRID_H)
             for x in range(GRID_W)
         )
-        coverage = round((scanned / (GRID_W * GRID_H)) * 100, 1)
+        coverage = float(round((scanned / (GRID_W * GRID_H)) * 100))
         return {
             "drones": [d.model_dump() for d in self.drones.values()],
             "zone": self.zone.model_dump(),
