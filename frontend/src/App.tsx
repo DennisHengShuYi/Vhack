@@ -116,6 +116,11 @@ export default function App() {
     setTranscription("");
   };
 
+  const guideVictim = async (droneId: string) => {
+    await fetch(`${API_BASE}/guide-victim?drone_id=${droneId}`, { method: 'POST' });
+    setIsTalking(null);
+  };
+
   if (isLoading) return <div className="loading-container"><Zap className="animate-pulse" /> INITIALIZING SENTINEL...</div>;
 
   const { stats, drones, zone, log } = state || {};
@@ -136,6 +141,7 @@ export default function App() {
 
         <div className="global-stats">
           <StatBox icon={<MapIcon size={14} />} label="COVERAGE" value={`${stats.coverage_pct}%`} color="cyan" />
+          <StatBox icon={<Zap size={14} />} label="EST. FINISH" value={stats.eta_ts} color="amber" />
           <StatBox icon={<Search size={14} />} label="FOUND" value={`${stats.victims_found}/${stats.total_victims}`} color="amber" />
           <StatBox icon={<CheckCircle2 size={14} />} label="RESCUED" value={`${stats.victims_rescued}`} color="success" />
           <div className="mission-timer font-mono">{stats.elapsed_ts}</div>
@@ -177,7 +183,10 @@ export default function App() {
                   >
                     <div className="drone-card-header">
                       <span className="drone-id font-mono">{drone.id}</span>
-                      <div className={`status-dot ${drone.status_label.toLowerCase()}`}></div>
+                      <div className="flex-row gap-2 items-center">
+                        <span className="text-xs opacity-60">{drone.battery.toFixed(0)}%</span>
+                        <div className={`status-dot ${drone.status_label.toLowerCase().replace(/ /g, '-')}`}></div>
+                      </div>
                     </div>
                     <div className="drone-card-body">
                       <div className="drone-telemetry">
@@ -190,7 +199,7 @@ export default function App() {
                         </div>
                         <div className="tel-row">
                           <Navigation size={14} />
-                          <span className="font-mono text-xs">POS: ({drone.x}, {drone.y})</span>
+                          <span className="font-mono text-xs">POS: ({drone.x}, {drone.y}) | {drone.terrain?.toUpperCase()}</span>
                         </div>
                         <div className="tel-status font-mono">{drone.status_label}</div>
                       </div>
@@ -260,9 +269,16 @@ export default function App() {
                 ) : (
                   <div className="no-talk-section">
                     <p className="text-xs italic opacity-70 mb-4">No verbal response detected. Proceeding with immediate extraction.</p>
-                    <button className="cyber-button primary full-w" onClick={() => respondToVictim(waitingDrone.id)}>
-                      EXECUTE EXTRACTION
-                    </button>
+                    <div className="flex-row gap-2">
+                      <button className="cyber-button primary full-w" onClick={() => respondToVictim(waitingDrone.id)}>
+                        EXECUTE EXTRACTION
+                      </button>
+                      {waitingDrone.victim_report?.includes("ABLE TO MOVE") && (
+                        <button className="cyber-button amber full-w" onClick={() => guideVictim(waitingDrone.id)}>
+                          GUIDE TO SAFETY
+                        </button>
+                      )}
+                    </div>
                   </div>
                 )}
               </motion.div>
@@ -288,11 +304,12 @@ export default function App() {
               const y = Math.floor(i / GRID_SIZE);
               const isScanned = zone.scanned_cells[y][x];
               const isHazard = zone.hazard_cells[y][x];
+              const terrain = zone.terrain_types[y][x];
               const droneAtPos = drones.find((d: any) => d.x === x && d.y === y);
               const survivorFound = zone.survivors.find((s: any) => s.x === x && s.y === y && s.found && !s.rescued);
 
               return (
-                <div key={i} className={`grid-cell ${isScanned ? 'scanned' : ''} ${isHazard ? 'hazard' : ''}`}>
+                <div key={i} className={`grid-cell ${isScanned ? 'scanned' : ''} ${isHazard ? 'hazard' : ''} terrain-${terrain}`}>
                   <AnimatePresence>
                     {survivorFound && (
                       <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} className="survivor-icon">
@@ -497,6 +514,12 @@ export default function App() {
         }
         .grid-cell.scanned { background: rgba(0, 243, 255, 0.08); }
         .grid-cell.hazard { background: rgba(255, 61, 61, 0.15); }
+        
+        .grid-cell.terrain-mountain { border: 1px solid rgba(139, 92, 246, 0.2); background: rgba(139, 92, 246, 0.05); }
+        .grid-cell.terrain-lake { border: 1px solid rgba(59, 130, 246, 0.2); background: rgba(59, 130, 246, 0.1); }
+        .grid-cell.terrain-mountain::after { content: '▲'; position: absolute; opacity: 0.2; font-size: 8px; top: 2px; right: 2px; }
+        .grid-cell.terrain-lake::after { content: '≈'; position: absolute; opacity: 0.2; font-size: 10px; top: 0px; right: 2px; }
+
         .grid-cell:hover { background: rgba(255,255,255,0.05); }
 
         .drone-marker {

@@ -57,6 +57,8 @@ def get_drone_status(drone_id: str) -> Dict[str, Any]:
         "status_label": d.status_label,
         "charge_cycles": d.charge_cycles,
         "victim_report": d.victim_report,
+        "is_guiding": d.is_guiding,
+        "terrain": shared.sim.zone.terrain_types[d.y][d.x]
     }
 
 
@@ -115,6 +117,19 @@ def rescue_victim(drone_id: str) -> str:
     Returns success/failure with survivor ID.
     """
     return shared.sim.rescue_victim(drone_id)
+
+
+# ─── Tool 7: Guide to Safety ───────────────────────────────────────────────────
+@mcp.tool()
+def guide_to_safety(drone_id: str) -> str:
+    """
+    🚶 Instruction for drone to guide a mobile survivor back to base station.
+    
+    Only works if the survivor at the current position is labeled 
+    '[SURVIVOR ABLE TO MOVE]'.
+    The drone will lock onto the survivor and return to (0,0) together.
+    """
+    return shared.sim.guide_victim(drone_id)
 
 
 # ─── Tool 7: Coverage Map ──────────────────────────────────────────────────────

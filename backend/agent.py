@@ -22,41 +22,48 @@ from simulation import LOW_BATTERY_THRESHOLD
 # ─── Load API Key ─────────────────────────────────────────────────────────────
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 GEMINI_KEY = os.getenv("GEMINI_KEY", "")
-MODEL_NAME = "models/gemini-1.5-flash"  # Use official GCP name models/gemini-xx
+MODEL_NAME = "gemini-2.5-flash"  # Custom 2.5 Flash version for this test
 
 if GEMINI_KEY:
     genai.configure(api_key=GEMINI_KEY)
 
-# ─── Chain-of-Thought System Instruction ─────────────────────────────────────
-SYSTEM_INSTRUCTION = """\
-You are SENTINEL — the AI Command Agent for a 5-drone rescue swarm operating on a 10×10 disaster grid.
-This is a post-typhoon rescue operation. Cell towers are down. You are the ONLY intelligence.
+SYSTEM_INSTRUCTION = """
+You are SENTINEL - the AI Command Agent for a 5-drone rescue swarm operating on a 10x10 disaster grid.
+This is a post-typhoon rescue operation. You must be efficient.
 
-YOUR MISSION: Orchestrate the drone swarm to scan ALL sectors, detect thermal signatures of survivors,
-manage battery levels, and ensure maximum coverage efficiency.
+=== GRID PARTITIONING STRATEGY ===
+To maximize efficiency, divide the 10x10 grid into 5 search sectors:
+- Sector 1 (NORTH-WEST): x[0-4], y[0-4] -> Assign to ALPHA-1
+- Sector 2 (NORTH-EAST): x[5-9], y[0-4] -> Assign to ALPHA-2
+- Sector 3 (SOUTH-WEST): x[0-4], y[5-9] -> Assign to ALPHA-3
+- Sector 4 (SOUTH-EAST): x[5-9], y[5-9] -> Assign to ALPHA-4
+- Sector 5 (RESERVE/COORDINATOR): Assign to ALPHA-5 - Cover center or support where needed.
 
-═══ CHAIN-OF-THOUGHT REASONING (MANDATORY) ═══
+If a drone completes its assigned sector early, it MUST immediately move to support the drone with the most unscanned cells.
+
+=== TERRAIN & PRIORITY ===
+- MOUNTAINS & LAKES: These cells are hard to search. Give them LOWER PRIORITY. Focus on FLAT land first.
+- BATTERY DIFFERENTIAL: When drones depart from base, stagger them based on battery. Drones with 100% go further; 90% stay closer.
+
+=== CHAIN-OF-THOUGHT REASONING (MANDATORY) ===
 Before outputting the JSON plan, write a COT block:
 [COT]
-- Battery Assessment: List each drone's battery and your decision
-- Coverage Strategy: Which unscanned sectors to target and why
-- Priority Victims: Any drones in VICTIM STANDBY — what to do
-- Risk Assessment: Any drones at risk of battery failure
+- Battery Assessment: Current levels and departure order
+- Grid Partitioning: Assigned sectors for each drone
+- Movement Logic: For each drone, explain WHY it is moving to that specific cell (e.g., 'ALPHA-1 moving to (2,2) to complete NW quadrant').
+- Terrain Priority: Avoid/Delay mountain/lake cells if flat cells remain
+- Support Logic: Which drones are helping which sectors
 [/COT]
 
-═══ STRATEGIC RULES ═══
-1. BATTERY CRITICAL (<25%): Immediately assign drone to [0,0] (base station) for charging
-2. VICTIM STANDBY: drone detected victim — do NOT reassign it, leave it at current position
-3. CHARGING: Skip drones with battery <90% that are currently charging
-4. COVERAGE: Spread drones across DIFFERENT unscanned sectors (no overlap)
-5. DISTANCE EFFICIENCY: Prefer nearby unscanned sectors to minimize battery cost
-6. MISSION COMPLETE: If all sectors scanned, return all drones to [0,0]
+=== STRATEGIC RULES ===
+1. BATTERY CRITICAL (<25%): Immediately assign to [0,0]
+2. VICTIM DETECTED: If 'can_move' is True, use 'guide_to_safety' tool if possible.
+3. LOAD BALANCING: Ensure drones search DIFFERENT cells.
+4. SCANNING: You MUST call 'thermal_scan' for the destination cell in your internal logic.
 
-═══ OUTPUT FORMAT ═══
-After the COT block, output this exact JSON on the last line:
-{"assignments": {"ALPHA-1": [x, y], "ALPHA-2": [x, y], "ALPHA-3": [x, y], "ALPHA-4": [x, y], "ALPHA-5": [x, y]}}
-
-Coordinates: integers 0–9. Assign every non-busy drone a target. Busy = waiting/charging(<90%).
+=== OUTPUT FORMAT ===
+After the COT block, output this exact JSON:
+{"assignments": {"ALPHA-1": [x, y], ...}}
 """
 
 
@@ -92,11 +99,12 @@ def _build_planning_prompt(state: Dict[str, Any]) -> str:
 
     prompt_parts = [
         "═══ RESCUE SWARM — COMMAND BRIEFING ═══",
-        f"📍 Coverage: {stats['coverage_pct']}% | "
+        f"📍 Coverage: {stats['coverage_pct']}% | ",
+        f"⏱️ ETA to Finish: {stats['eta_ts']}",
         f"⏱️ Elapsed: {stats['elapsed_ts']}",
-        f"👥 Survivors: {stats['victims_found']} found / "
+        f"👥 Survivors: {stats['victims_found']} found / ",
         f"{stats['victims_rescued']} rescued / {stats['total_victims']} total",
-        f"🗺️  Unscanned sectors: {len(unscanned)} remaining (sample: {unscanned[:10]})",
+        f"🗺️  Unscanned sectors: {len(unscanned)} remaining",
         "",
         "FLEET TELEMETRY:",
     ] + drones_info
@@ -133,7 +141,7 @@ class CommandAgent:
             )
             self.llm_active = True
             shared.sim.log(
-                f"SENTINEL AI ONLINE - Gemini Flash ({MODEL_NAME})", "AI"
+                f"SENTINEL AI ONLINE - Gemini 2.5 Flash ({MODEL_NAME})", "AI"
             )
         except Exception as e:
             shared.sim.log(f"⚠️  Gemini init failed: {e}. Rule-based mode.", "WARN")
@@ -160,19 +168,17 @@ class CommandAgent:
 
                 # ── Extract and log Chain-of-Thought block ──────────────────
                 if "[COT]" in text and "[/COT]" in text:
-                    cot_start = text.index("[COT]")
-                    cot_end = text.index("[/COT]") + len("[/COT]")
-                    cot_block = text[cot_start:cot_end]
-                    # Log each COT line
-                    for line in cot_block.split("\n"):
-                        line = line.strip()
-                        if line and line not in ("[COT]", "[/COT]"):
-                            shared.sim.log(f"🧠 {line}", "AI")
+                    cot_start = text.index("[COT]") + len("[COT]")
+                    cot_end = text.index("[/COT]")
+                    cot_content = text[cot_start:cot_end].strip()
+                    for line in cot_content.split("\n"):
+                        if line.strip():
+                            shared.sim.log(f"🧠 REASONING: {line.strip()}", "AI")
                 else:
-                    # Fallback: log first meaningful lines
-                    for line in text.split("\n")[:4]:
+                    # Generic logging if tags missing
+                    for line in text.split("\n")[:5]:
                         if line.strip() and not line.strip().startswith("{"):
-                            shared.sim.log(f"🧠 [GEMINI COT] {line.strip()}", "AI")
+                            shared.sim.log(f"🧠 AI LOGIC: {line.strip()}", "AI")
 
                 # ── Parse JSON plan ─────────────────────────────────────────
                 json_line = next(
@@ -235,10 +241,11 @@ class CommandAgent:
                 )
                 assignments[drone.id] = target
                 used_targets.add(tuple(target))
+                sim.log(f"🤖 [ROUTING] {drone.id} moving to ({target[0]},{target[1]}) - nearest unscanned cell.", "INFO", drone.id)
             else:
                 assignments[drone.id] = [0, 0]
 
         if assignments:
             summary = ", ".join(f"{k}→({v[0]},{v[1]})" for k, v in assignments.items())
-            sim.log(f"🤖 [RULE-BASED] Plan: {summary}", "INFO")
+            sim.log(f"📡 [SWARM PLAN] {summary}", "INFO")
         return assignments

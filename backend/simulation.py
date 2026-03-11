@@ -35,6 +35,8 @@ class Drone(BaseModel):
     charge_cycles: int = 0
     status_label: str = "STANDBY"
     path_history: List[List[int]] = []  # recent positions for trail
+    is_guiding: bool = False
+    guiding_victim_id: Optional[str] = None
 
 
 class DisasterZone(BaseModel):
@@ -43,6 +45,7 @@ class DisasterZone(BaseModel):
     survivors: List[Dict[str, Any]] = []
     scanned_cells: List[List[bool]] = []
     hazard_cells: List[List[bool]] = []   # collapsed structures / fire
+    terrain_types: List[List[str]] = []   # 'flat', 'mountain', 'lake'
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -54,6 +57,17 @@ class DisasterZone(BaseModel):
             for _ in range(8):
                 hx, hy = random.randint(1, 9), random.randint(1, 9)
                 self.hazard_cells[hy][hx] = True
+        
+        if not self.terrain_types:
+            self.terrain_types = [['flat'] * self.width for _ in range(self.height)]
+            # Add mountains and lakes
+            for _ in range(5):
+                mx, my = random.randint(2, 8), random.randint(2, 8)
+                self.terrain_types[my][mx] = 'mountain'
+            for _ in range(3):
+                lx, ly = random.randint(1, 8), random.randint(1, 8)
+                self.terrain_types[ly][lx] = 'lake'
+
         if not self.survivors:
             num = random.randint(5, 8)
             reports = [
@@ -82,6 +96,8 @@ class DisasterZone(BaseModel):
                     "rescued": False,
                     "heat_intensity": random.randint(80, 98),
                     "triage_priority": random.choice(["P1-CRITICAL", "P2-URGENT", "P3-STABLE"]),
+                    "can_move": random.choice([True, False, False]), # 1 in 3 can walk
+                    "notified_rescue": False,
                 })
 
 
@@ -176,6 +192,19 @@ class SimulationState:
         drone.battery = max(0.0, drone.battery - cost)
         drone.target_x, drone.target_y = x, y
         drone.status_label = "NAVIGATING"
+        
+        # If guiding a survivor, they move with the drone
+        if drone.is_guiding and drone.guiding_victim_id:
+             for s in self.zone.survivors:
+                 if s["id"] == drone.guiding_victim_id:
+                     s["x"], s["y"] = x, y
+                     if (x, y) == (0, 0):
+                         s["rescued"] = True
+                         drone.is_guiding = False
+                         drone.guiding_victim_id = None
+                         self.total_rescued += 1
+                         self.log(f"Survivor {s['id']} guided safely to base station!", "SUCCESS", drone_id)
+
         drone.path_history.append([x, y])
         if len(drone.path_history) > 15:
             drone.path_history = drone.path_history[-15:]
@@ -271,11 +300,18 @@ class SimulationState:
                     "report": survivor["report"],
                     "triage": survivor["triage_priority"],
                 }
+                if not survivor["notified_rescue"]:
+                    survivor["notified_rescue"] = True
+                    self.log(f"📡 NOTIFICATION SENT TO RESCUE TEAM: Victim {survivor['id']} at ({x},{y})", "COMMS")
+
                 msg = (
                     f"[CRITICAL] THERMAL MATCH at ({x},{y})! "
                     f"CNN Confidence: {confidence}% | Triage: {survivor['triage_priority']} | "
                     f"Report: [{survivor['report']}] - DRONE ON STANDBY."
                 )
+                if survivor.get("can_move"):
+                    msg += " [SURVIVOR ABLE TO MOVE - CAN BE GUIDED TO BASE]"
+                
                 self.log(msg, "CRITICAL", drone_id)
                 return msg
             elif survivor and survivor["found"] and not survivor["rescued"]:
@@ -307,6 +343,33 @@ class SimulationState:
                 return msg
         return f"No unrescued victim at ({drone.x},{drone.y})."
 
+    def guide_victim(self, drone_id: str) -> str:
+        """Instruction for drone to guide a mobile survivor back to base."""
+        drone = self.drones.get(drone_id)
+        if not drone: return "Drone not found"
+        for s in self.zone.survivors:
+            if s["x"] == drone.x and s["y"] == drone.y and s["found"] and not s["rescued"]:
+                if s.get("can_move"):
+                    drone.is_guiding = True
+                    drone.guiding_victim_id = s["id"]
+                    drone.target_x, drone.target_y = 0, 0
+                    drone.status_label = "GUIDING TO BASE"
+                    self.log(f"Drone {drone_id} guiding survivor {s['id']} to safety zone.", "INFO", drone_id)
+                    return f"Guiding survivor {s['id']} to (0,0)."
+                else:
+                    return f"Survivor {s['id']} is unable to move. Stationary rescue required."
+        return "No victim at current location."
+
+    def get_estimated_finish_time(self) -> str:
+        """Simple ETA based on remaining cells and active drones."""
+        unscanned = len(self.get_unscanned_cells())
+        active_drones = len([d for d in self.drones.values() if d.status_label != "STANDBY"])
+        if active_drones == 0: return "NA"
+        # 0.7s per sim step, approx 1.5 steps per cell including scanning/turns
+        seconds = (unscanned / active_drones) * 1.5 * 0.7
+        m, s = divmod(int(seconds), 60)
+        return f"{m:02}m {s:02}s"
+
     def get_unscanned_cells(self) -> List[List[int]]:
         """Returns list of [x, y] not yet scanned."""
         return [
@@ -334,6 +397,7 @@ class SimulationState:
                 "victims_rescued": self.total_rescued,
                 "mission_active": self.mission_active,
                 "elapsed_ts": self._ts(),
+                "eta_ts": self.get_estimated_finish_time(),
                 "grid_w": GRID_W,
                 "grid_h": GRID_H,
             },

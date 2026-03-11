@@ -106,6 +106,8 @@ class MissionManager:
                 if (drone.x, drone.y) == (0, 0) and drone.battery < 100 and (
                     drone.returning_to_base or drone.is_charging or drone.battery < LOW_BATTERY_THRESHOLD
                 ):
+                    if not drone.is_charging:
+                         sim.log(f"🤖 [SYSTEM LOGIC] {d_id} arrived at base. Commencing autonomous recharge sequence.", "INFO", d_id)
                     sim.charge_step(d_id)
                     if not drone.is_charging:
                         drone.returning_to_base = False
@@ -122,8 +124,10 @@ class MissionManager:
                 if drone.x == tx and drone.y == ty:
                     if tx == 0 and ty == 0:
                         drone.returning_to_base = True
+                        sim.log(f"🤖 [SYSTEM LOGIC] {d_id} returned to base safely. Switching to standby/charge.", "INFO", d_id)
                         sim.charge_step(d_id)
                     else:
+                        sim.log(f"🤖 [SYSTEM LOGIC] {d_id} reached target ({tx},{ty}). Executing thermal sweep.", "INFO", d_id)
                         # Perform thermal scan
                         result = sim.scan(d_id)
                         if "THERMAL MATCH" not in result and "VICTIM_DETECTED" not in result:
@@ -138,14 +142,21 @@ class MissionManager:
                 elif ny != ty:
                     ny += 1 if ty > ny else -1
 
-                # Battery gate before move
-                if drone.battery <= BATTERY_DRAIN_MOVE:
-                    sim.log(f"⚡ {d_id} critically low — emergency RTB!", "WARN", d_id)
-                    drone.target_x, drone.target_y = 0, 0
-                    drone.returning_to_base = True
-                    continue
-
+                old_x, old_y = drone.x, drone.y
                 drone.x, drone.y = nx, ny
+                
+                # If guiding, victim moves with drone
+                if drone.is_guiding and drone.guiding_victim_id:
+                    for s in sim.zone.survivors:
+                        if s["id"] == drone.guiding_victim_id:
+                            s["x"], s["y"] = nx, ny
+                            if (nx, ny) == (0, 0):
+                                s["rescued"] = True
+                                drone.is_guiding = False
+                                drone.guiding_victim_id = None
+                                sim.total_rescued += 1
+                                sim.log(f"Survivor {s['id']} guided safely to base station!", "SUCCESS", d_id)
+
                 drone.battery = max(0.0, drone.battery - BATTERY_DRAIN_MOVE)
                 drone.status_label = f"→({tx},{ty})"
 
@@ -159,7 +170,7 @@ class MissionManager:
                     drone.target_x, drone.target_y = 0, 0
                     drone.returning_to_base = True
                     sim.log(
-                        f"🪫 {d_id} battery {drone.battery:.0f}% — RTB forced!", "WARN", d_id
+                        f"🪫 [SYSTEM LOGIC] {d_id} battery {drone.battery:.0f}% below threshold. Initiating safety RTB protocol.", "WARN", d_id
                     )
 
                 # Opportunistic scan while passing through
@@ -236,7 +247,7 @@ async def victim_response(drone_id: str, operator_message: Optional[str] = None)
             import google.generativeai as genai
             import json
             
-            p_model = genai.GenerativeModel("models/gemini-1.5-flash")
+            p_model = genai.GenerativeModel("gemini-2.5-flash")
             
             # Request parsing of coordinates or location clues
             parse_prompt = (
@@ -266,7 +277,7 @@ async def victim_response(drone_id: str, operator_message: Optional[str] = None)
                 print(f"JSON Parse error from speech extraction: {je}")
 
             # Also do standard medical triage for the CURRENT victim
-            triage_model = genai.GenerativeModel("models/gemini-1.5-flash")
+            triage_model = genai.GenerativeModel("gemini-2.5-flash")
             victim_ctx = drone.victim_report or "Unknown situation"
             resp = await asyncio.wait_for(
                 asyncio.to_thread(
@@ -290,6 +301,13 @@ async def victim_response(drone_id: str, operator_message: Optional[str] = None)
         drone.status_label = "RESUMING"
 
     return {"status": "Drone resumed", "result": result}
+
+
+@app.post("/guide-victim")
+async def guide_victim(drone_id: str):
+    """Command a drone to guide the mobile survivor at its location to base."""
+    result = shared.sim.guide_victim(drone_id)
+    return {"status": "Guide command issued", "result": result}
 
 
 if __name__ == "__main__":
