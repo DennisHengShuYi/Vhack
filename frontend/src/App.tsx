@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Shield,
   Cpu,
@@ -38,6 +38,7 @@ export default function App() {
   const [activeDroneId, setActiveDroneId] = useState<string | null>(null);
 
   const logEndRef = useRef<HTMLDivElement>(null);
+  const recognitionRef = useRef<any>(null);
 
   // Poll state every 800ms
   useEffect(() => {
@@ -57,10 +58,12 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // Auto-scroll logic
+  // Auto-scroll removed as per user request to prevent "pulling down"
+  /*
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [state?.log]);
+  */
 
   const runMission = async () => {
     setIsDeploying(true);
@@ -71,36 +74,74 @@ export default function App() {
   const [isTalking, setIsTalking] = useState<boolean | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [transcription, setTranscription] = useState("");
+  const [speechError, setSpeechError] = useState<string | null>(null);
 
-  const startVoiceCapture = () => {
-    setIsRecording(true);
-    // Use Web Speech API if available
+  const toggleVoiceCapture = () => {
+    setSpeechError(null);
+    if (isRecording) {
+      if (recognitionRef.current) {
+        recognitionRef.current.onend = null; // Prevent onend from resetting state again
+        recognitionRef.current.stop();
+      }
+      setIsRecording(false);
+      return;
+    }
+
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (SpeechRecognition) {
-      const recognition = new SpeechRecognition();
-      recognition.onresult = (event: any) => {
-        const text = event.results[0][0].transcript;
-        setTranscription(text);
-        setOperatorMsg(text);
+      try {
+        const recognition = new SpeechRecognition();
+        recognitionRef.current = recognition;
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = 'en-US';
+
+        recognition.onstart = () => {
+          setIsRecording(true);
+          console.log("Speech recognition started");
+        };
+
+        recognition.onresult = (event: any) => {
+          let currentTranscription = '';
+          for (let i = 0; i < event.results.length; i++) {
+            currentTranscription += event.results[i][0].transcript;
+          }
+          if (currentTranscription) {
+            setTranscription(currentTranscription);
+            setOperatorMsg(currentTranscription);
+          }
+        };
+
+        recognition.onerror = (event: any) => {
+          console.error("Speech Recognition Error:", event.error);
+          setSpeechError(`Error: ${event.error}. Check microphone permissions.`);
+          setIsRecording(false);
+        };
+
+        recognition.onend = () => {
+          console.log("Speech recognition ended naturally");
+          setIsRecording(false);
+        };
+
+        recognition.start();
+      } catch (err) {
+        setSpeechError("Failed to initialize speech recognition.");
         setIsRecording(false);
-      };
-      recognition.onerror = () => setIsRecording(false);
-      recognition.start();
+      }
     } else {
-      // Mock for environments without speech API
+      setSpeechError("Web Speech API not supported in this browser.");
+      // Fallback mock
+      setIsRecording(true);
       setTimeout(() => {
-        const mocks = [
-          "My family is trapped at coordinate 5 8, please help",
-          "There are more people at sector 2 9 under the bridge",
-          "I am okay but my friend is bleeding at the south east corner",
-          "Help, we are at the middle of the grid, position 4 4"
-        ];
-        const text = mocks[Math.floor(Math.random() * mocks.length)];
-        setTranscription(text);
-        setOperatorMsg(text);
+        setTranscription("Simulated: My friend is at grid 10");
+        setOperatorMsg("My friend is at grid 10");
         setIsRecording(false);
-      }, 2000);
+      }, 3000);
     }
+  };
+
+  const stopMission = async () => {
+    await fetch(`${API_BASE}/stop-mission`, { method: 'POST' });
   };
 
   const resetMission = async () => {
@@ -120,6 +161,7 @@ export default function App() {
     await fetch(`${API_BASE}/guide-victim?drone_id=${droneId}`, { method: 'POST' });
     setIsTalking(null);
   };
+
 
   if (isLoading) return <div className="loading-container"><Zap className="animate-pulse" /> INITIALIZING SENTINEL...</div>;
 
@@ -148,12 +190,16 @@ export default function App() {
         </div>
 
         <div className="header-actions">
-          {!stats.mission_active && (
+          {stats.mission_active ? (
+            <button className="cyber-button danger" onClick={stopMission}>
+              STOP MISSION
+            </button>
+          ) : (
             <button className="cyber-button primary" onClick={runMission} disabled={isDeploying}>
               {isDeploying ? <RefreshCcw className="animate-spin" size={16} /> : "DEPLOY SWARM"}
             </button>
           )}
-          <button className="cyber-button danger" onClick={resetMission}>RESET</button>
+          <button className="cyber-button secondary" onClick={resetMission}>RESET</button>
         </div>
       </header>
 
@@ -221,69 +267,6 @@ export default function App() {
             )}
           </div>
 
-          {/* Victim Interaction Overlay (Inline) */}
-          <AnimatePresence>
-            {waitingDrone && (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }}
-                className="victim-comms-panel glass accent-amber"
-              >
-                <div className="panel-header">
-                  <AlertTriangle className="animate-pulse text-amber" />
-                  <span className="font-bold">VICTIM CONTACT: {waitingDrone.id}</span>
-                </div>
-
-                <div className="victim-report font-mono">
-                  {waitingDrone.victim_report}
-                </div>
-
-                {isTalking === null ? (
-                  <div className="talk-query">
-                    <p className="text-sm mb-3">Is the victim talking?</p>
-                    <div className="flex-row gap-2">
-                      <button className="cyber-button primary compact" onClick={() => setIsTalking(true)}>YES</button>
-                      <button className="cyber-button danger compact" onClick={() => setIsTalking(false)}>NO</button>
-                    </div>
-                  </div>
-                ) : isTalking ? (
-                  <div className="voice-capture-section">
-                    <button
-                      className={`voice-record-btn ${isRecording ? 'recording' : ''}`}
-                      onClick={startVoiceCapture}
-                      disabled={isRecording}
-                    >
-                      {isRecording ? <Activity className="animate-pulse" /> : <Volume2 />}
-                      {isRecording ? "RECORDING..." : "START VOICE CAPTURE"}
-                    </button>
-                    {transcription && (
-                      <div className="transcription-preview font-mono">
-                        <span className="text-cyan">TRANSCRIBED:</span> "{transcription}"
-                      </div>
-                    )}
-                    <div className="operator-control mt-4">
-                      <button className="cyber-button primary full-w" onClick={() => respondToVictim(waitingDrone.id)}>
-                        <Send size={16} /> SEND TO SENTINEL AI
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="no-talk-section">
-                    <p className="text-xs italic opacity-70 mb-4">No verbal response detected. Proceeding with immediate extraction.</p>
-                    <div className="flex-row gap-2">
-                      <button className="cyber-button primary full-w" onClick={() => respondToVictim(waitingDrone.id)}>
-                        EXECUTE EXTRACTION
-                      </button>
-                      {waitingDrone.victim_report?.includes("ABLE TO MOVE") && (
-                        <button className="cyber-button amber full-w" onClick={() => guideVictim(waitingDrone.id)}>
-                          GUIDE TO SAFETY
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </motion.div>
-            )}
-          </AnimatePresence>
         </section>
 
         {/* Center: Tactical Map */}
@@ -392,6 +375,80 @@ export default function App() {
         </section>
       </main>
 
+      {/* --- Global Overlays --- */}
+      <AnimatePresence>
+        {waitingDrone && (
+          <div className="modal-backdrop">
+            <motion.div
+              initial={{ opacity: 0, y: 50 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 50 }}
+              className="victim-comms-panel glass accent-amber"
+            >
+              <div className="panel-header">
+                <AlertTriangle className="animate-pulse text-amber" />
+                <span className="font-bold">S.O.S CONTACT: {waitingDrone.id}</span>
+              </div>
+              
+              <div className="victim-report font-mono">
+                {waitingDrone.victim_report}
+              </div>
+
+              {isTalking === null ? (
+                <div className="talk-query">
+                  <p className="text-sm mb-3">Survivor detected. Establish communication?</p>
+                  <div className="flex-row gap-2">
+                    <button className="cyber-button amber full-w" onClick={() => setIsTalking(true)}>
+                      <Volume2 size={16} /> VOICE INTERFACE
+                    </button>
+                    <button className="cyber-button primary full-w" onClick={() => setIsTalking(false)}>
+                      <Zap size={16} /> DIRECT ACTION
+                    </button>
+                  </div>
+                </div>
+              ) : isTalking ? (
+                <div className="voice-capture-section">
+                  <button
+                    className={`voice-record-btn ${isRecording ? 'recording' : ''}`}
+                    onClick={toggleVoiceCapture}
+                  >
+                    {isRecording ? <Activity className="animate-pulse" /> : <Volume2 />}
+                    {isRecording ? "STOP RECORDING" : "START VOICE CAPTURE"}
+                  </button>
+                  {speechError && (
+                    <div className="speech-error font-mono" style={{ fontSize: '0.65rem', color: 'var(--accent-red)', marginTop: '8px', opacity: 0.9 }}>
+                      {speechError}
+                    </div>
+                  )}
+                  {transcription && (
+                    <div className="transcription-preview font-mono">
+                      <span className="text-cyan">TRANSCRIBED:</span> "{transcription}"
+                    </div>
+                  )}
+                  <div className="operator-control mt-4">
+                    <button className="cyber-button primary full-w" onClick={() => respondToVictim(waitingDrone.id)}>
+                      <Send size={16} /> SEND TO SENTINEL AI
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="no-talk-section">
+                  <p className="text-xs italic opacity-70 mb-4">Manual override: Choose extraction method.</p>
+                  <div className="flex-row gap-2">
+                    <button className="cyber-button primary full-w" onClick={() => respondToVictim(waitingDrone.id)}>
+                      EMERGENCY EXTRACTION
+                    </button>
+                    {waitingDrone.victim_report?.includes("ABLE TO MOVE") && (
+                      <button className="cyber-button amber full-w" onClick={() => guideVictim(waitingDrone.id)}>
+                        GUIDE TO SAFETY
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* --- CSS - Inline specifically for the dashboard components --- */}
       <style>{`
         .app-container {
@@ -480,9 +537,12 @@ export default function App() {
         .log-entry { margin-bottom: 4px; display: flex; gap: 6px; }
         .log-ts { color: var(--accent-cyan); opacity: 0.6; }
         .log-drone { color: var(--accent-amber); }
-        .log-entry.critical { color: var(--accent-red); font-weight: bold; }
-        .log-entry.success { color: var(--accent-success); }
-        .log-entry.ai { border-left: 2px solid var(--accent-cyan); padding-left: 6px; color: #a5f3fc; }
+        .log-entry.verbal { color: #00f3ff; font-style: italic; border-left: 3px solid #00f3ff; padding-left: 10px; margin: 4px 0; text-shadow: 0 0 5px rgba(0, 243, 255, 0.3); }
+        .log-entry.victim_found { color: #ffb300; font-weight: bold; background: rgba(255, 179, 0, 0.15); padding: 5px 8px; border-radius: 4px; margin: 6px 0; border: 1px solid rgba(255, 179, 0, 0.3); box-shadow: 0 0 10px rgba(255, 179, 0, 0.2); }
+        .log-entry.ai { border-left: 3px solid #a5f3fc; padding-left: 10px; color: #a5f3fc; font-weight: 500; margin: 2px 0; }
+        .log-entry.warn { color: #ffb300; opacity: 0.9; }
+        .log-entry.error { color: #ff3d3d; font-weight: bold; background: rgba(255, 61, 61, 0.1); padding: 2px 4px; }
+        .log-entry.success { color: #00ff88; text-shadow: 0 0 5px rgba(0, 255, 136, 0.3); }
 
         .center-map { display: flex; flex-direction: column; position: relative; padding: 1rem; }
         .map-overlay-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
@@ -545,9 +605,16 @@ export default function App() {
         .active-mission-stats { padding: 1rem; }
         .net-stat-row { display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 0.7rem; }
 
+        .modal-backdrop {
+          position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+          background: rgba(0,0,0,0.7); backdrop-filter: blur(4px);
+          display: flex; align-items: center; justify-content: center; z-index: 100;
+        }
+
         .victim-comms-panel {
-          position: absolute; bottom: 1rem; left: 1rem; right: 1rem; z-index: 50; padding: 1.5rem;
-          border: 2px solid var(--accent-amber) !important; box-shadow: 0 0 30px rgba(255, 179, 0, 0.4);
+          width: 450px; padding: 2rem;
+          border: 2px solid var(--accent-amber) !important; box-shadow: 0 0 40px rgba(255, 179, 0, 0.5);
+          position: relative;
         }
         .victim-report { background: rgba(0,0,0,0.6); padding: 10px; border-radius: 4px; border: 1px solid rgba(255,179,0,0.2); margin: 10px 0; font-size: 0.75rem; color: var(--accent-amber); }
         .talk-query { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 10px; border: 1px dashed rgba(255,255,255,0.1); border-radius: 8px; }

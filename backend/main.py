@@ -85,7 +85,8 @@ class MissionManager:
                     for drone_id, target in plan.items():
                         if drone_id in sim.drones:
                             drone = sim.drones[drone_id]
-                            if not drone.is_waiting_response:
+                            # Only assign if not in waiting/voice override
+                            if not drone.is_waiting_response and not drone.voice_override:
                                 drone.target_x = int(target[0])
                                 drone.target_y = int(target[1])
                                 if target != [0, 0]:
@@ -127,11 +128,22 @@ class MissionManager:
                         sim.log(f"🤖 [SYSTEM LOGIC] {d_id} returned to base safely. Switching to standby/charge.", "INFO", d_id)
                         sim.charge_step(d_id)
                     else:
-                        sim.log(f"🤖 [SYSTEM LOGIC] {d_id} reached target ({tx},{ty}). Executing thermal sweep.", "INFO", d_id)
-                        # Perform thermal scan
-                        result = sim.scan(d_id)
-                        if "THERMAL MATCH" not in result and "VICTIM_DETECTED" not in result:
-                            drone.target_x = None  # Free for next assignment
+                        # If reached voice target, now return if needed
+                        if drone.voice_override and drone.original_pos and (tx, ty) != tuple(drone.original_pos):
+                             sim.log(f"✅ {d_id} reached voice target ({tx},{ty}). Scanning then returning to original position.", "SUCCESS", d_id)
+                             sim.scan(d_id)
+                             drone.target_x, drone.target_y = drone.original_pos
+                        elif drone.voice_override and drone.original_pos and (tx, ty) == tuple(drone.original_pos):
+                             sim.log(f"🏠 {d_id} returned to original position. Resuming autonomous mission.", "INFO", d_id)
+                             drone.voice_override = False
+                             drone.original_pos = None
+                             drone.target_x = None
+                        else:
+                            sim.log(f"🤖 [SYSTEM LOGIC] {d_id} reached target ({tx},{ty}). Executing thermal sweep.", "INFO", d_id)
+                            # Perform thermal scan
+                            result = sim.scan(d_id)
+                            if "THERMAL MATCH" not in result and "VICTIM_DETECTED" not in result:
+                                drone.target_x = None  # Free for next assignment
                         drone.status_label = "SCANNED"
                     continue
 
@@ -220,6 +232,14 @@ async def run_mission(background_tasks: BackgroundTasks):
     }
 
 
+@app.post("/stop-mission")
+async def stop_mission():
+    """Halt the active search mission."""
+    shared.sim.mission_active = False
+    shared.sim.log("🛑 MISSION HALTED BY OPERATOR", "WARN")
+    return {"status": "Mission stopped"}
+
+
 @app.post("/reset")
 async def reset_mission():
     """Reset simulation and reinitialize with new disaster layout."""
@@ -242,7 +262,7 @@ async def victim_response(drone_id: str, operator_message: Optional[str] = None)
 
     # Log operator message and run AI triage / extraction if provided
     if operator_message and operator_message.strip():
-        sim.log(f"COMMS FROM {drone_id}: '{operator_message}'", "COMMS", drone_id)
+        sim.log(f"🎙️ VERBAL INPUT: \"{operator_message}\"", "VERBAL", drone_id)
         try:
             import google.generativeai as genai
             import json
@@ -252,11 +272,13 @@ async def victim_response(drone_id: str, operator_message: Optional[str] = None)
             # Request parsing of coordinates or location clues
             parse_prompt = (
                 f"You are a rescue dispatcher. Victim at current position said: '{operator_message}'. "
-                "Task: If they mention a location of OTHER survivors (e.g. 'family at (5,6)' or 'my son is at sector 2-3'), "
+                "Task: If they mention a location of OTHER survivors (e.g. 'family at (5,6)', 'grid 10', '10,10' or 'sector 2-3'), "
                 "extract the coordinates [x, y] as integers 0-9. "
-                "Current Grid is 10x10. If they say 'south-east corner' infer (9,9). "
-                "If they say 'middle' infer (4,4). "
-                "Output JSON: {\"target\": [x, y], \"reason\": \"...\"} or if no location mentioned, output {}."
+                "Instructions: "
+                "1. Grid is 10x10. If they say '10,10' map to (9,9). "
+                "2. If they say 'Grid N' (0-99), N%10 is x, N//10 is y. "
+                "3. If they say 'middle' infer (4,4). "
+                "Output JSON: {\"target\": [x, y], \"reason\": \"string summarize why this unit is moving there\"} or if no location mentioned, output {}."
             )
             
             p_resp = await asyncio.wait_for(
@@ -270,9 +292,9 @@ async def victim_response(drone_id: str, operator_message: Optional[str] = None)
                 data = json.loads(json_str)
                 if data.get("target"):
                     tx, ty = data["target"]
-                    reason = data.get("reason", "Reported by survivor")
+                    reason = data.get("reason", "Reported coordinate")
                     sim.add_victim(tx, ty, f"Survivor intel: {reason}")
-                    sim.log(f"AI EXTRACTED NEW TARGET: ({tx},{ty}) from comms.", "AI", drone_id)
+                    sim.log(f"AI INTEL PARSED: Target ({tx},{ty}) identified from speech. Reason: {reason}", "AI", drone_id)
             except Exception as je:
                 print(f"JSON Parse error from speech extraction: {je}")
 
@@ -308,6 +330,77 @@ async def guide_victim(drone_id: str):
     """Command a drone to guide the mobile survivor at its location to base."""
     result = shared.sim.guide_victim(drone_id)
     return {"status": "Guide command issued", "result": result}
+
+
+@app.post("/voice-command")
+async def voice_command(message: str):
+    """
+    Handle global voice commands via Gemini 2.5 Flash.
+    Example: "Move closest drone to grid 10"
+    """
+    sim = shared.sim
+    sim.log(f"🎙️ GLOBAL VOICE: '{message}'", "VERBAL")
+    
+    try:
+        import google.generativeai as genai
+        import json
+        
+        p_model = genai.GenerativeModel("gemini-2.5-flash")
+        
+        # Grid is 10x10 (0-9, 0-9). 
+        # Help Gemini understand the user might say "grid 10" or "sector 5"
+        parse_prompt = (
+            f"You are a rescue dispatcher. Command: '{message}'. "
+            "The search area is a 10x10 grid where x and y are 0-9. (0,0) is the base station. "
+            "Rules: "
+            "1. If user says 'grid N' (where N is 0-99), map it to x = N % 10, y = N // 10. "
+            "2. If user says 'coordinate (X,Y)', map directly. "
+            "3. If user says 'sector' or vague location, infer best [x, y]. "
+            "Return JSON: {\"target\": [x, y], \"reason\": \"...\"} "
+            "or {} if the message is not a movement command."
+        )
+        
+        p_resp = await asyncio.wait_for(
+            asyncio.to_thread(lambda: p_model.generate_content(parse_prompt)),
+            timeout=12.0,
+        )
+        
+        json_str = p_resp.text.strip().replace("```json", "").replace("```", "").strip()
+        data = json.loads(json_str)
+        
+        if data.get("target"):
+            tx, ty = data["target"]
+            tx = max(0, min(9, tx))
+            ty = max(0, min(9, ty))
+            reason = data.get("reason", "Voice instruction")
+            
+            # Find closest available drone
+            best_drone = None
+            min_dist = 999
+            
+            for drone in sim.drones.values():
+                # Skip drones in specialized states
+                if drone.is_waiting_response or drone.is_charging:
+                    continue
+                dist = abs(drone.x - tx) + abs(drone.y - ty)
+                if dist < min_dist:
+                    min_dist = dist
+                    best_drone = drone
+            
+            if best_drone:
+                best_drone.original_pos = [best_drone.x, best_drone.y]
+                best_drone.target_x, best_drone.target_y = tx, ty
+                best_drone.voice_override = True
+                sim.log(f"🧠 AI DISPATCH: Re-routing {best_drone.id} to ({tx},{ty}) target. Reason: {reason}", "AI", best_drone.id)
+                return {"status": "Command executed", "drone": best_drone.id, "target": [tx, ty]}
+            else:
+                return {"status": "No drones available for override"}
+                
+    except Exception as e:
+        sim.log(f"Voice processing error: {e}", "ERROR")
+        return {"error": str(e)}
+        
+    return {"status": "Command analyzed but no action taken"}
 
 
 if __name__ == "__main__":

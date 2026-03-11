@@ -37,6 +37,8 @@ class Drone(BaseModel):
     path_history: List[List[int]] = []  # recent positions for trail
     is_guiding: bool = False
     guiding_victim_id: Optional[str] = None
+    voice_override: bool = False # If true, AI planning won't overwrite target
+    original_pos: Optional[List[int]] = None # Where to return after voice command
 
 
 class DisasterZone(BaseModel):
@@ -135,8 +137,6 @@ class SimulationState:
             "drone": drone_id,
         }
         self.mission_log.append(entry)
-        if len(self.mission_log) > 300:
-            self.mission_log = self.mission_log[-300:]
         tag = f"[{drone_id}]" if drone_id else ""
         print(f"[{entry['ts']}][{level}]{tag} {text}")
 
@@ -312,7 +312,7 @@ class SimulationState:
                 if survivor.get("can_move"):
                     msg += " [SURVIVOR ABLE TO MOVE - CAN BE GUIDED TO BASE]"
                 
-                self.log(msg, "CRITICAL", drone_id)
+                self.log(msg, "VICTIM_FOUND", drone_id)
                 return msg
             elif survivor and survivor["found"] and not survivor["rescued"]:
                 return f"Confirmed victim at ({x},{y}) — awaiting extraction."
@@ -389,7 +389,7 @@ class SimulationState:
         return {
             "drones": [d.model_dump() for d in self.drones.values()],
             "zone": self.zone.model_dump(),
-            "log": self.mission_log[-60:],
+            "log": self.mission_log,
             "stats": {
                 "coverage_pct": coverage,
                 "total_victims": len(self.zone.survivors),

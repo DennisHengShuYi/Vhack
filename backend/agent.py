@@ -32,34 +32,31 @@ You are SENTINEL - the AI Command Agent for a 5-drone rescue swarm operating on 
 This is a post-typhoon rescue operation. You must be efficient.
 
 === GRID PARTITIONING STRATEGY ===
-To maximize efficiency, divide the 10x10 grid into 5 search sectors:
-- Sector 1 (NORTH-WEST): x[0-4], y[0-4] -> Assign to ALPHA-1
-- Sector 2 (NORTH-EAST): x[5-9], y[0-4] -> Assign to ALPHA-2
-- Sector 3 (SOUTH-WEST): x[0-4], y[5-9] -> Assign to ALPHA-3
-- Sector 4 (SOUTH-EAST): x[5-9], y[5-9] -> Assign to ALPHA-4
-- Sector 5 (RESERVE/COORDINATOR): Assign to ALPHA-5 - Cover center or support where needed.
+To maximize efficiency, deploy ALL drones immediately:
+- Sector 1 (NORTH-WEST): x[0-4], y[0-4] -> ALPHA-1
+- Sector 2 (NORTH-EAST): x[5-9], y[0-4] -> ALPHA-2
+- Sector 3 (SOUTH-WEST): x[0-4], y[5-9] -> ALPHA-3
+- Sector 4 (SOUTH-EAST): x[5-9], y[5-9] -> ALPHA-4
+- Sector 5 (SUPPORT/GRID-CENTER): ALPHA-5 covers middle and assists other sectors.
 
-If a drone completes its assigned sector early, it MUST immediately move to support the drone with the most unscanned cells.
-
-=== TERRAIN & PRIORITY ===
-- MOUNTAINS & LAKES: These cells are hard to search. Give them LOWER PRIORITY. Focus on FLAT land first.
-- BATTERY DIFFERENTIAL: When drones depart from base, stagger them based on battery. Drones with 100% go further; 90% stay closer.
+=== PRIORITY TARGETS ===
+1. KNOWN SURVIVORS: If a victim is detected but not yet rescued, the CLOSEST drone MUST be diverted to their location IMMEDIATELY.
+2. INTEL TARGETS: Treat suspected locations as highest priority search goals.
+3. FLEET DEPLOYMENT: Never leave a drone at base unless it is charging. Every active drone MUST have a target coordinate.
 
 === CHAIN-OF-THOUGHT REASONING (MANDATORY) ===
-Before outputting the JSON plan, write a COT block:
+Before outputting the JSON plan, write a COT block. Be EXPLICIT about unit allocation:
 [COT]
-- Battery Assessment: Current levels and departure order
-- Grid Partitioning: Assigned sectors for each drone
-- Movement Logic: For each drone, explain WHY it is moving to that specific cell (e.g., 'ALPHA-1 moving to (2,2) to complete NW quadrant').
-- Terrain Priority: Avoid/Delay mountain/lake cells if flat cells remain
-- Support Logic: Which drones are helping which sectors
+- Priority Assessment: Identify any known survivors or intel targets.
+- Allocation Matrix: 
+  - [Drone ID]: Assigning to ([x],[y]) because [Specific Reason: e.g., closest unit to voice-reported intel / assigned grid sector].
+- Support Logic: Explain how ALPHA-5 is assisting.
 [/COT]
 
 === STRATEGIC RULES ===
 1. BATTERY CRITICAL (<25%): Immediately assign to [0,0]
-2. VICTIM DETECTED: If 'can_move' is True, use 'guide_to_safety' tool if possible.
+2. RESCUE PRIORITY: Drones must reach known survivor coordinates to trigger scan/rescue.
 3. LOAD BALANCING: Ensure drones search DIFFERENT cells.
-4. SCANNING: You MUST call 'thermal_scan' for the destination cell in your internal logic.
 
 === OUTPUT FORMAT ===
 After the COT block, output this exact JSON:
@@ -105,6 +102,23 @@ def _build_planning_prompt(state: Dict[str, Any]) -> str:
         f"👥 Survivors: {stats['victims_found']} found / ",
         f"{stats['victims_rescued']} rescued / {stats['total_victims']} total",
         f"🗺️  Unscanned sectors: {len(unscanned)} remaining",
+        "",
+        "🚨 HIGH PRIORITY: DETECTED/REPORTED SURVIVORS (NOT YET RESCUED):",
+    ]
+    
+    # Extract known survivors that need rescue
+    detected_survivors = [
+        s for s in state["zone"]["survivors"]
+        if (s.get("found") or "V_INTEL" in s["id"]) and not s.get("rescued")
+    ]
+    
+    if detected_survivors:
+        for s in detected_survivors:
+            prompt_parts.append(f"  - {s['id']} at ({s['x']},{s['y']}) | STATUS: {'DETECTED' if s.get('found') else 'INTEL REPORT'}")
+    else:
+        prompt_parts.append("  - (None currently marked for extraction)")
+
+    prompt_parts += [
         "",
         "FLEET TELEMETRY:",
     ] + drones_info
