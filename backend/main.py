@@ -17,7 +17,7 @@ Result: Drones always animate. UI is always live. AI adds intelligence, not bloc
 import os
 import asyncio
 import time
-from typing import Optional
+from typing import Optional, Any
 
 import uvicorn
 from fastapi import FastAPI, BackgroundTasks
@@ -96,9 +96,27 @@ class MissionManager:
                             drone.base_x, drone.base_y = base_x, base_y
                             # Only assign if not in waiting/voice override
                             if not drone.is_waiting_response and not drone.voice_override:
-                                drone.target_x = int(target[0])
-                                drone.target_y = int(target[1])
-                                if target != [base_x, base_y]:
+                                tx = max(0, min(9, int(target[0])))
+                                ty = max(0, min(9, int(target[1])))
+                                if sim.is_inaccessible(tx, ty):
+                                    fallback_cells = sim.get_unscanned_cells()
+                                    if fallback_cells:
+                                        nearest_safe = min(
+                                            fallback_cells,
+                                            key=lambda c: abs(c[0] - tx) + abs(c[1] - ty),
+                                        )
+                                        tx, ty = nearest_safe[0], nearest_safe[1]
+                                        sim.log(
+                                            f"⚠️ [SYSTEM LOGIC] {drone_id} reassigned from inaccessible ({int(target[0])},{int(target[1])}) to safe ({tx},{ty}).",
+                                            "WARN",
+                                            drone_id,
+                                        )
+                                    else:
+                                        tx, ty = base_x, base_y
+
+                                drone.target_x = tx
+                                drone.target_y = ty
+                                if [tx, ty] != [base_x, base_y]:
                                     drone.returning_to_base = False
                                     drone.mission_complete_rtb = False
                                     drone.status = "ON_MISSION"
@@ -422,6 +440,17 @@ async def voice_command(message: str):
             tx, ty = data["target"]
             tx = max(0, min(9, tx))
             ty = max(0, min(9, ty))
+            if sim.is_inaccessible(tx, ty):
+                accessible_cells = sim.get_unscanned_cells()
+                if accessible_cells:
+                    nearest_safe = min(
+                        accessible_cells,
+                        key=lambda c: abs(c[0] - tx) + abs(c[1] - ty),
+                    )
+                    tx, ty = nearest_safe[0], nearest_safe[1]
+                    sim.log(f"⚠️ Voice target was inaccessible. Redirected to safe sector ({tx},{ty}).", "WARN")
+                else:
+                    tx, ty = sim.base_station
             reason = data.get("reason", "Voice instruction")
             
             # Find closest available drone

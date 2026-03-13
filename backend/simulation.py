@@ -110,7 +110,7 @@ class DisasterZone(BaseModel):
 class SimulationState:
     def __init__(self):
         self.zone = DisasterZone()
-        spawn_points = self._sample_unique_points(NUM_DRONES + 1)
+        spawn_points = self._sample_accessible_points(NUM_DRONES + 1)
         self.base_station = spawn_points[0]
         base_x, base_y = self.base_station
         self.drones: Dict[str, Drone] = {}
@@ -139,6 +139,28 @@ class SimulationState:
         if len(selected) < count:
             selected.extend(random.choices(cells, k=count - len(selected)))
         return selected
+
+    def _sample_accessible_points(self, count: int) -> List[tuple[int, int]]:
+        cells = self.get_accessible_cells()
+        if not cells:
+            return self._sample_unique_points(count)
+        selected = random.sample(cells, min(count, len(cells)))
+        if len(selected) < count:
+            selected.extend(random.choices(cells, k=count - len(selected)))
+        return selected
+
+    def is_inaccessible(self, x: int, y: int) -> bool:
+        if x < 0 or y < 0 or x >= GRID_W or y >= GRID_H:
+            return True
+        return bool(self.zone.hazard_cells[y][x])
+
+    def get_accessible_cells(self) -> List[tuple[int, int]]:
+        return [
+            (x, y)
+            for y in range(GRID_H)
+            for x in range(GRID_W)
+            if not self.zone.hazard_cells[y][x]
+        ]
 
     def _distance_to_home(self, drone: Drone) -> int:
         bx, by = self.base_station
@@ -219,6 +241,8 @@ class SimulationState:
             return f"{drone_id} is on VICTIM STANDBY — awaiting operator confirmation."
         x = max(0, min(GRID_W - 1, x))
         y = max(0, min(GRID_H - 1, y))
+        if self.is_inaccessible(x, y):
+            return f"ERROR: Sector ({x},{y}) is INACCESSIBLE. Choose a non-hazard cell."
 
         steps = abs(drone.x - x) + abs(drone.y - y)
         cost = steps * BATTERY_DRAIN_MOVE
@@ -256,6 +280,8 @@ class SimulationState:
         """Dynamically add a new victim to the simulation (e.g. from intelligence)."""
         x = max(0, min(GRID_W - 1, x))
         y = max(0, min(GRID_H - 1, y))
+        if self.is_inaccessible(x, y):
+            return f"Cannot place victim intel at ({x},{y}) — sector is INACCESSIBLE."
         victim_id = f"V_INTEL_{len(self.zone.survivors) + 1}"
         
         # Check if a victim already exists at this spot to avoid duplicates
@@ -423,16 +449,23 @@ class SimulationState:
             [x, y]
             for y in range(GRID_H)
             for x in range(GRID_W)
-            if not self.zone.scanned_cells[y][x]
+            if not self.zone.scanned_cells[y][x] and not self.zone.hazard_cells[y][x]
         ]
 
     def get_status(self) -> Dict[str, Any]:
         scanned = sum(
-            self.zone.scanned_cells[y][x]
+            1
             for y in range(GRID_H)
             for x in range(GRID_W)
+            if self.zone.scanned_cells[y][x] and not self.zone.hazard_cells[y][x]
         )
-        coverage = float(round((scanned / (GRID_W * GRID_H)) * 100))
+        accessible_total = sum(
+            1
+            for y in range(GRID_H)
+            for x in range(GRID_W)
+            if not self.zone.hazard_cells[y][x]
+        )
+        coverage = 100.0 if accessible_total == 0 else float(round((scanned / accessible_total) * 100))
         return {
             "drones": [d.model_dump() for d in self.drones.values()],
             "zone": self.zone.model_dump(),

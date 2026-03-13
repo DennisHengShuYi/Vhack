@@ -165,7 +165,9 @@ export default function App() {
 
   if (isLoading) return <div className="loading-container"><Zap className="animate-pulse" /> INITIALIZING SENTINEL...</div>;
 
-  const { stats, drones, zone, log } = state || {};
+  const { stats, drones, zone, log, base_station } = state || {};
+  const baseX = base_station?.x ?? 0;
+  const baseY = base_station?.y ?? 0;
   const activeDronesCount = drones?.filter((d: any) => d.status_label !== "STANDBY")?.length || 0;
   const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
 
@@ -311,7 +313,7 @@ export default function App() {
                       <span className="d-label font-mono">{droneAtPos.id.split('-')[1]}</span>
                     </motion.div>
                   )}
-                  {x === 0 && y === 0 && <Power size={14} className="base-icon" />}
+                  {x === baseX && y === baseY && <Power size={14} className="base-icon" />}
                 </div>
               );
             })}
