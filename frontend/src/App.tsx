@@ -36,6 +36,8 @@ export default function App() {
   const [operatorMsg, setOperatorMsg] = useState("");
   const [isDeploying, setIsDeploying] = useState(false);
   const [activeDroneId, setActiveDroneId] = useState<string | null>(null);
+  const [logFilter, setLogFilter] = useState<'all' | 'warn' | 'error' | 'victim_found' | 'ai'>('all');
+  const [showRtbOnly, setShowRtbOnly] = useState(false);
 
   const logEndRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<any>(null);
@@ -170,6 +172,15 @@ export default function App() {
   const baseY = base_station?.y ?? 0;
   const activeDronesCount = drones?.filter((d: any) => d.status_label !== "STANDBY")?.length || 0;
   const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
+  const isReturningDrone = (drone: any) =>
+    drone?.returning_to_base ||
+    String(drone?.status_label || '').toLowerCase().includes('rtb') ||
+    String(drone?.status || '').toLowerCase() === 'returning';
+  const displayedDrones = showRtbOnly ? (drones || []).filter(isReturningDrone) : (drones || []);
+  const filteredLog = (log || []).filter((entry: any) => {
+    if (logFilter === 'all') return true;
+    return entry.level?.toLowerCase() === logFilter;
+  });
 
   return (
     <div className="app-container">
@@ -221,8 +232,15 @@ export default function App() {
 
           <div className="tab-content glass scroll-area">
             {activeTab === 'telemetry' ? (
-              <div className="drone-list">
-                {drones.map((drone: any) => (
+              <div>
+                <div className="telemetry-toolbar">
+                  <button className={`toggle-btn ${showRtbOnly ? 'active' : ''}`} onClick={() => setShowRtbOnly((v) => !v)}>
+                    {showRtbOnly ? 'SHOWING: RTB ONLY' : 'SHOW RTB ONLY'}
+                  </button>
+                  <span className="telemetry-count">{displayedDrones.length} drone(s)</span>
+                </div>
+                <div className="drone-list">
+                {displayedDrones.map((drone: any) => (
                   <motion.div
                     key={drone.id}
                     className={`drone-card ${activeDroneId === drone.id ? 'active' : ''} ${drone.is_waiting_response ? 'alert' : ''}`}
@@ -249,15 +267,26 @@ export default function App() {
                           <Navigation size={14} />
                           <span className="font-mono text-xs">POS: ({drone.x}, {drone.y}) | {drone.terrain?.toUpperCase()}</span>
                         </div>
-                        <div className="tel-status font-mono">{drone.status_label}</div>
+                        <div className={`status-chip ${drone.status_label.toLowerCase().replace(/ /g, '-').replace(/[^a-z0-9-]/g, '')}`}>
+                          {drone.status_label}
+                        </div>
                       </div>
                     </div>
                   </motion.div>
                 ))}
+                </div>
               </div>
             ) : (
-              <div className="mission-log font-mono">
-                {log.map((entry: any) => (
+              <div>
+                <div className="log-controls">
+                  <button className={`log-filter-btn ${logFilter === 'all' ? 'active' : ''}`} onClick={() => setLogFilter('all')}>ALL</button>
+                  <button className={`log-filter-btn ${logFilter === 'warn' ? 'active' : ''}`} onClick={() => setLogFilter('warn')}>WARN</button>
+                  <button className={`log-filter-btn ${logFilter === 'error' ? 'active' : ''}`} onClick={() => setLogFilter('error')}>ERROR</button>
+                  <button className={`log-filter-btn ${logFilter === 'victim_found' ? 'active' : ''}`} onClick={() => setLogFilter('victim_found')}>VICTIM</button>
+                  <button className={`log-filter-btn ${logFilter === 'ai' ? 'active' : ''}`} onClick={() => setLogFilter('ai')}>AI</button>
+                </div>
+                <div className="mission-log font-mono">
+                {filteredLog.map((entry: any) => (
                   <div key={entry.id} className={`log-entry ${entry.level.toLowerCase()}`}>
                     <span className="log-ts">[{entry.ts}]</span>
                     {entry.drone && <span className="log-drone">[{entry.drone}]</span>}
@@ -265,6 +294,7 @@ export default function App() {
                   </div>
                 ))}
                 <div ref={logEndRef} />
+                </div>
               </div>
             )}
           </div>
@@ -291,6 +321,7 @@ export default function App() {
               const isHazard = zone.hazard_cells[y][x];
               const terrain = zone.terrain_types[y][x];
               const droneAtPos = drones.find((d: any) => d.x === x && d.y === y);
+              const isDroneReturning = droneAtPos ? isReturningDrone(droneAtPos) : false;
               const survivorFound = zone.survivors.find((s: any) => s.x === x && s.y === y && s.found && !s.rescued);
 
               return (
@@ -306,7 +337,7 @@ export default function App() {
                   {droneAtPos && (
                     <motion.div
                       layoutId={`drone-${droneAtPos.id}`}
-                      className={`drone-marker ${droneAtPos.is_waiting_response ? 'special' : ''}`}
+                      className={`drone-marker ${droneAtPos.is_waiting_response ? 'special' : ''} ${isDroneReturning ? 'returning' : ''} ${showRtbOnly && !isDroneReturning ? 'dimmed' : ''}`}
                       title={droneAtPos.id}
                     >
                       <Cpu size={14} />
@@ -478,7 +509,7 @@ export default function App() {
         }
         .brand-logo { color: var(--accent-cyan); width: 32px; height: 32px; filter: drop-shadow(0 0 8px var(--accent-cyan)); }
         .brand-text h1 { font-size: 1.5rem; margin: 0; line-height: 1; }
-        .brand-text .subtitle { font-size: 0.6rem; color: var(--text-muted); text-transform: uppercase; }
+        .brand-text .subtitle { font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; }
 
         .global-stats {
           display: flex;
@@ -507,13 +538,36 @@ export default function App() {
         .panel-tabs button {
           flex: 1; background: rgba(255, 255, 255, 0.05); border: none; color: var(--text-muted);
           padding: 10px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px;
-          font-family: 'Orbitron', sans-serif; font-size: 0.7rem; border-radius: 8px 8px 0 0;
+          font-family: 'Orbitron', sans-serif; font-size: 0.8rem; border-radius: 8px 8px 0 0;
           transition: all 0.2s;
         }
         .panel-tabs button.active { background: var(--bg-panel); color: var(--accent-cyan); border: 1px solid var(--border-glass); border-bottom: none; }
 
         .tab-content { flex: 1; padding: 1rem; position: relative; }
         .scroll-area { overflow-y: auto; }
+
+        .telemetry-toolbar {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          margin-bottom: 10px;
+          gap: 8px;
+        }
+        .toggle-btn {
+          font-size: 0.68rem;
+          padding: 5px 10px;
+          border-radius: 999px;
+          border: 1px solid rgba(255,255,255,0.25);
+          color: var(--text-muted);
+          background: rgba(255,255,255,0.04);
+          cursor: pointer;
+        }
+        .toggle-btn.active {
+          color: #ffe8b5;
+          border-color: var(--accent-amber);
+          background: rgba(255, 179, 0, 0.14);
+        }
+        .telemetry-count { font-size: 0.75rem; color: var(--text-muted); }
 
         .drone-card {
           background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05);
@@ -522,7 +576,7 @@ export default function App() {
         .drone-card.active { border-color: var(--accent-cyan); background: rgba(0, 243, 255, 0.05); }
         .drone-card.alert { border-color: var(--accent-amber); background: rgba(255, 179, 0, 0.1); box-shadow: 0 0 15px rgba(255, 179, 0, 0.2); }
         .drone-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-        .drone-id { font-size: 0.9rem; font-weight: bold; }
+        .drone-id { font-size: 1rem; font-weight: bold; }
         .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #444; }
         .status-dot.ready { background: var(--accent-success); box-shadow: 0 0 5px var(--accent-success); }
         .status-dot.navigating, .status-dot.resuming { background: var(--accent-cyan); }
@@ -533,11 +587,41 @@ export default function App() {
         .battery-fill { height: 100%; background: var(--accent-success); border-radius: 2px; }
         .battery-fill.critical { background: var(--accent-red); }
         .tel-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
-        .tel-status { font-size: 0.65rem; color: var(--accent-cyan); margin-top: 4px; text-transform: uppercase; }
+        .status-chip {
+          display: inline-flex;
+          margin-top: 6px;
+          padding: 3px 8px;
+          border-radius: 999px;
+          font-size: 0.72rem;
+          color: #dff9ff;
+          background: rgba(0, 243, 255, 0.12);
+          border: 1px solid rgba(0, 243, 255, 0.35);
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+        }
+        .status-chip.charging { color: #ffe8b5; background: rgba(255, 179, 0, 0.12); border-color: rgba(255, 179, 0, 0.35); }
+        .status-chip.victim-detected, .status-chip.victim-standby { color: #ffd2d2; background: rgba(255, 61, 61, 0.15); border-color: rgba(255, 61, 61, 0.4); }
+        .status-chip.ready, .status-chip.awaiting-orders { color: #ccffe8; background: rgba(0, 255, 136, 0.1); border-color: rgba(0, 255, 136, 0.35); }
+        .status-chip.rtb--complete, .status-chip.guiding-to-base { color: #ffe8b5; background: rgba(255, 179, 0, 0.12); border-color: rgba(255, 179, 0, 0.35); }
 
-        .mission-log { font-size: 0.7rem; line-height: 1.5; color: var(--text-muted); }
+        .log-controls { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+        .log-filter-btn {
+          font-size: 0.68rem;
+          padding: 4px 8px;
+          border-radius: 999px;
+          border: 1px solid rgba(255,255,255,0.2);
+          color: var(--text-muted);
+          background: rgba(255,255,255,0.04);
+          cursor: pointer;
+        }
+        .log-filter-btn.active {
+          color: var(--text-primary);
+          border-color: var(--accent-cyan);
+          background: rgba(0, 243, 255, 0.12);
+        }
+        .mission-log { font-size: 0.8rem; line-height: 1.6; color: var(--text-primary); }
         .log-entry { margin-bottom: 4px; display: flex; gap: 6px; }
-        .log-ts { color: var(--accent-cyan); opacity: 0.6; }
+        .log-ts { color: var(--accent-cyan); opacity: 0.85; }
         .log-drone { color: var(--accent-amber); }
         .log-entry.verbal { color: #00f3ff; font-style: italic; border-left: 3px solid #00f3ff; padding-left: 10px; margin: 4px 0; text-shadow: 0 0 5px rgba(0, 243, 255, 0.3); }
         .log-entry.victim_found { color: #ffb300; font-weight: bold; background: rgba(255, 179, 0, 0.15); padding: 5px 8px; border-radius: 4px; margin: 6px 0; border: 1px solid rgba(255, 179, 0, 0.3); box-shadow: 0 0 10px rgba(255, 179, 0, 0.2); }
@@ -548,7 +632,7 @@ export default function App() {
 
         .center-map { display: flex; flex-direction: column; position: relative; padding: 1rem; }
         .map-overlay-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
-        .legend { display: flex; gap: 1rem; font-size: 0.6rem; }
+        .legend { display: flex; gap: 1rem; font-size: 0.72rem; }
         .legend-item { display: flex; align-items: center; gap: 4px; opacity: 0.8; }
         .dot { width: 6px; height: 6px; border-radius: 50%; }
         .dot.base { background: var(--accent-cyan); }
@@ -590,7 +674,9 @@ export default function App() {
           box-shadow: 0 0 15px var(--accent-cyan); z-index: 10;
         }
         .drone-marker.special { background: var(--accent-amber); box-shadow: 0 0 15px var(--accent-amber); }
-        .d-label { font-size: 0.6rem; line-height: 1; font-weight: bold; }
+        .drone-marker.returning { outline: 2px solid var(--accent-amber); box-shadow: 0 0 18px rgba(255, 179, 0, 0.55); }
+        .drone-marker.dimmed { opacity: 0.2; }
+        .d-label { font-size: 0.7rem; line-height: 1; font-weight: bold; }
         .survivor-icon { color: var(--accent-amber); filter: drop-shadow(0 0 8px var(--accent-amber)); }
         .base-icon { color: var(--accent-cyan); opacity: 0.5; }
 
@@ -601,11 +687,11 @@ export default function App() {
         .thermal-preview { flex: 1; min-height: 150px; margin: 10px 0; display: flex; align-items: center; justify-content: center; background: #000; overflow: hidden; }
         .thermal-matrix { display: grid; grid-template-columns: repeat(5, 1fr); gap: 2px; width: 100%; height: 100%; }
         .thermal-pixel { width: 100%; height: 100%; transition: background 0.3s; }
-        .readout { display: flex; justify-content: space-between; font-size: 0.6rem; color: var(--text-muted); padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+        .readout { display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--text-muted); padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
         .readout .val { color: var(--accent-cyan); }
         
         .active-mission-stats { padding: 1rem; }
-        .net-stat-row { display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 0.7rem; }
+        .net-stat-row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 0.82rem; }
 
         .modal-backdrop {
           position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
@@ -626,7 +712,7 @@ export default function App() {
           padding: 12px; border-radius: 8px; cursor: pointer; transition: all 0.3s; font-family: 'Orbitron'; font-size: 0.7rem;
         }
         .voice-record-btn.recording { background: rgba(255, 61, 61, 0.2); border-color: var(--accent-red); color: var(--accent-red); }
-        .transcription-preview { margin-top: 10px; font-size: 0.7rem; background: rgba(0,0,0,0.3); padding: 8px; border-radius: 4px; border-left: 2px solid var(--accent-cyan); }
+        .transcription-preview { margin-top: 10px; font-size: 0.8rem; background: rgba(0,0,0,0.3); padding: 8px; border-radius: 4px; border-left: 2px solid var(--accent-cyan); }
         .flex-row { display: flex; }
         .gap-2 { gap: 0.5rem; }
         .full-w { width: 100%; }
@@ -655,7 +741,7 @@ function StatBox({ icon, label, value, color }: { icon: any, label: string, valu
       <div className="stat-value font-mono" style={{ color: colors[color] }}>{value}</div>
       <style>{`
         .stat-box { display: flex; flex-direction: column; align-items: flex-start; }
-        .stat-label { font-size: 0.6rem; color: var(--text-muted); text-transform: uppercase; display: flex; align-items: center; gap: 4px; }
+        .stat-label { font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; display: flex; align-items: center; gap: 4px; }
         .stat-value { font-size: 1.1rem; font-weight: bold; }
       `}</style>
     </div>
