@@ -48,7 +48,10 @@ def get_drone_status(drone_id: str) -> Dict[str, Any]:
         "id": d.id,
         "x": d.x,
         "y": d.y,
+        "base_x": d.base_x,
+        "base_y": d.base_y,
         "battery": round(d.battery, 1),
+        "status": d.status,
         "is_charging": d.is_charging,
         "returning_to_base": d.returning_to_base,
         "is_waiting_response": d.is_waiting_response,
@@ -68,7 +71,7 @@ def move_to(drone_id: str, x: int, y: int) -> str:
     """
     🚁 Command drone to navigate to grid coordinate (x, y).
 
-    Grid: 10×10 (coordinates 0–9 for both x and y). Base station at (0,0).
+    Grid: 10×10 (coordinates 0–9 for both x and y). One shared base station is used.
     Battery cost: 2% per cell (Manhattan distance).
     Returns warning if battery insufficient — recall to charge first.
 
@@ -96,10 +99,10 @@ def thermal_scan(drone_id: str) -> str:
 @mcp.tool()
 def initiate_charging(drone_id: str) -> str:
     """
-    🔋 Begin emergency charging sequence at base station (0,0).
+    🔋 Begin emergency charging sequence at the shared base station.
 
-    Charges 25% per call. Drone MUST be at (0,0).
-    Call move_to(drone_id, 0, 0) first if not already at base.
+    Charges 25% per call. Drone MUST be at the shared base station.
+    Use get_drone_status(drone_id) for base_x/base_y and move there first.
 
     RECALL POLICY: ANY drone below 25% battery MUST be recalled immediately.
     """
@@ -127,7 +130,7 @@ def guide_to_safety(drone_id: str) -> str:
     
     Only works if the survivor at the current position is labeled 
     '[SURVIVOR ABLE TO MOVE]'.
-    The drone will lock onto the survivor and return to (0,0) together.
+    The drone will lock onto the survivor and return to the shared base station together.
     """
     return shared.sim.guide_victim(drone_id)
 

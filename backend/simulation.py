@@ -15,6 +15,7 @@ CHARGE_RATE          = 25.0   # % per charge_step call
 BATTERY_DRAIN_MOVE   = 2.0    # % per cell moved
 BATTERY_DRAIN_SCAN   = 1.0    # % per thermal scan
 LOW_BATTERY_THRESHOLD = 25.0  # % — recall threshold
+BATTERY_RETURN_RESERVE = 8.0  # % — emergency reserve after reaching base
 NUM_DRONES           = 5
 
 
@@ -22,11 +23,14 @@ class Drone(BaseModel):
     id: str
     x: int = 0
     y: int = 0
+    base_x: int = 0
+    base_y: int = 0
     battery: float = 100.0
     is_charging: bool = False
     is_waiting_response: bool = False
     returning_to_base: bool = False
     mission_complete_rtb: bool = False
+    status: str = "IDLE"
     target_x: Optional[int] = None
     target_y: Optional[int] = None
     victim_report: Optional[str] = None
@@ -105,18 +109,50 @@ class DisasterZone(BaseModel):
 
 class SimulationState:
     def __init__(self):
-        self.drones: Dict[str, Drone] = {
-            f"ALPHA-{i}": Drone(id=f"ALPHA-{i}", x=0, y=0, status_label="STANDBY")
-            for i in range(1, NUM_DRONES + 1)
-        }
         self.zone = DisasterZone()
+        spawn_points = self._sample_unique_points(NUM_DRONES + 1)
+        self.base_station = spawn_points[0]
+        base_x, base_y = self.base_station
+        self.drones: Dict[str, Drone] = {}
+        for i in range(1, NUM_DRONES + 1):
+            start_x, start_y = spawn_points[i]
+            drone_id = f"ALPHA-{i}"
+            self.drones[drone_id] = Drone(
+                id=drone_id,
+                x=start_x,
+                y=start_y,
+                base_x=base_x,
+                base_y=base_y,
+                status="IDLE",
+                status_label="STANDBY",
+            )
         self.mission_log: List[Dict] = []
-        self.base_station = (0, 0)
         self.mission_active = False
         self.mission_start_time: Optional[float] = None
         self.total_victims_found = 0
         self.total_rescued = 0
         self._log_id = 0
+
+    def _sample_unique_points(self, count: int) -> List[tuple[int, int]]:
+        cells = [(x, y) for y in range(GRID_H) for x in range(GRID_W)]
+        selected = random.sample(cells, min(count, len(cells)))
+        if len(selected) < count:
+            selected.extend(random.choices(cells, k=count - len(selected)))
+        return selected
+
+    def _distance_to_home(self, drone: Drone) -> int:
+        bx, by = self.base_station
+        return abs(drone.x - bx) + abs(drone.y - by)
+
+    def minimum_battery_to_return(self, drone: Drone) -> float:
+        return (self._distance_to_home(drone) * BATTERY_DRAIN_MOVE) + BATTERY_RETURN_RESERVE
+
+    def should_return_to_base(self, drone: Drone) -> bool:
+        if drone.is_charging:
+            return False
+        low_threshold = drone.battery < LOW_BATTERY_THRESHOLD
+        cannot_safely_return_later = drone.battery <= self.minimum_battery_to_return(drone)
+        return low_threshold or cannot_safely_return_later
 
     # ─── Utilities ───────────────────────────────────────────────────────────
 
@@ -178,6 +214,7 @@ class SimulationState:
         if drone_id not in self.drones:
             return f"ERROR: '{drone_id}' not found. Use list_drones() first."
         drone = self.drones[drone_id]
+        drone.base_x, drone.base_y = self.base_station
         if drone.is_waiting_response:
             return f"{drone_id} is on VICTIM STANDBY — awaiting operator confirmation."
         x = max(0, min(GRID_W - 1, x))
@@ -187,12 +224,13 @@ class SimulationState:
         cost = steps * BATTERY_DRAIN_MOVE
         if drone.battery < cost + 5:
             return (f"WARNING: Insufficient battery ({drone.battery:.0f}%) for "
-                    f"{steps}-cell move (costs {cost:.0f}%). Recall to (0,0) first.")
+                    f"{steps}-cell move (costs {cost:.0f}%). Recall to ({drone.base_x},{drone.base_y}) first.")
 
         old_x, old_y = drone.x, drone.y
         drone.x, drone.y = x, y
         drone.battery = max(0.0, drone.battery - cost)
         drone.target_x, drone.target_y = x, y
+        drone.status = "ON_MISSION"
         drone.status_label = "NAVIGATING"
         
         # If guiding a survivor, they move with the drone
@@ -200,7 +238,7 @@ class SimulationState:
              for s in self.zone.survivors:
                  if s["id"] == drone.guiding_victim_id:
                      s["x"], s["y"] = x, y
-                     if (x, y) == (0, 0):
+                     if (x, y) == (drone.base_x, drone.base_y):
                          s["rescued"] = True
                          drone.is_guiding = False
                          drone.guiding_victim_id = None
@@ -237,20 +275,23 @@ class SimulationState:
         return f"Sector ({x},{y}) added to priority search queue."
 
     def charge_step(self, drone_id: str) -> str:
-        """Charge drone 25% per call. Must be at base (0,0)."""
+        """Charge drone 25% per call. Must be at this drone's base."""
         if drone_id not in self.drones:
             return "ERROR: Drone not found"
         drone = self.drones[drone_id]
-        if (drone.x, drone.y) != self.base_station:
-            return (f"ERROR: {drone_id} must be at base (0,0). "
-                    f"Currently at ({drone.x},{drone.y}). Move to (0,0) first.")
+        drone.base_x, drone.base_y = self.base_station
+        if (drone.x, drone.y) != (drone.base_x, drone.base_y):
+            return (f"ERROR: {drone_id} must be at base ({drone.base_x},{drone.base_y}). "
+                    f"Currently at ({drone.x},{drone.y}). Move to base first.")
         drone.is_charging = True
         drone.returning_to_base = False
         drone.battery = min(100.0, drone.battery + CHARGE_RATE)
+        drone.status = "CHARGING"
         drone.status_label = "CHARGING"
         if drone.battery >= 100.0:
             drone.is_charging = False
             drone.charge_cycles += 1
+            drone.status = "IDLE"
             drone.status_label = "READY"
             msg = f"[BATTERY] {drone_id} fully charged. Ready for deployment. Cycles: {drone.charge_cycles}"
             self.log(msg, "CHARGE", drone_id)
@@ -268,6 +309,7 @@ class SimulationState:
             return f"WARNING: {drone_id} critically low battery. Cannot scan."
 
         drone.battery = max(0.0, drone.battery - BATTERY_DRAIN_SCAN)
+        drone.status = "ON_MISSION"
         x, y = drone.x, drone.y
         self.zone.scanned_cells[y][x] = True
         drone.status_label = "SCANNING"
@@ -294,6 +336,7 @@ class SimulationState:
                 survivor["found"] = True
                 drone.is_waiting_response = True
                 drone.victim_report = survivor["report"]
+                drone.status = "IDLE"
                 drone.status_label = "VICTIM DETECTED"
                 self.total_victims_found += 1
                 drone.last_thermal_scan = {
@@ -338,6 +381,7 @@ class SimulationState:
                 self.total_rescued += 1
                 drone.is_waiting_response = False
                 drone.victim_report = None
+                drone.status = "IDLE"
                 drone.status_label = "RESUMING"
                 msg = (f"[SUCCESS] Survivor {s['id']} extracted from ({drone.x},{drone.y}). "
                        f"Total rescued: {self.total_rescued}")
@@ -354,10 +398,11 @@ class SimulationState:
                 if s.get("can_move"):
                     drone.is_guiding = True
                     drone.guiding_victim_id = s["id"]
-                    drone.target_x, drone.target_y = 0, 0
+                    drone.target_x, drone.target_y = drone.base_x, drone.base_y
+                    drone.status = "RETURNING"
                     drone.status_label = "GUIDING TO BASE"
                     self.log(f"Drone {drone_id} guiding survivor {s['id']} to safety zone.", "INFO", drone_id)
-                    return f"Guiding survivor {s['id']} to (0,0)."
+                    return f"Guiding survivor {s['id']} to ({drone.base_x},{drone.base_y})."
                 else:
                     return f"Survivor {s['id']} is unable to move. Stationary rescue required."
         return "No victim at current location."
@@ -392,6 +437,7 @@ class SimulationState:
             "drones": [d.model_dump() for d in self.drones.values()],
             "zone": self.zone.model_dump(),
             "log": self.mission_log,
+            "base_station": {"x": self.base_station[0], "y": self.base_station[1]},
             "stats": {
                 "coverage_pct": coverage,
                 "total_victims": len(self.zone.survivors),

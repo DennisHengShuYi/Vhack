@@ -52,7 +52,7 @@ Before outputting the JSON plan, write a COT block. Be EXPLICIT about unit alloc
 [/COT]
 
 === STRATEGIC RULES ===
-1. BATTERY CRITICAL (<25%): Immediately assign to [0,0]
+1. BATTERY CRITICAL (<25%): Immediately assign the drone to the shared base station [base_x, base_y]
 2. RESCUE PRIORITY: Drones must reach known survivor coordinates to trigger scan/rescue.
 3. LOAD BALANCING: Ensure drones search DIFFERENT cells.
 
@@ -83,6 +83,7 @@ def _build_planning_prompt(state: Dict[str, Any]) -> str:
         flag_str = " | ".join(flags) if flags else "ACTIVE"
         drones_info.append(
             f"  {d['id']:8s} → pos=({d['x']},{d['y']}) "
+            f"base=({d.get('base_x', 0)},{d.get('base_y', 0)}) "
             f"bat={d['battery']:.0f}% "
             f"status={d['status_label']:20s} [{flag_str}]"
         )
@@ -95,6 +96,7 @@ def _build_planning_prompt(state: Dict[str, Any]) -> str:
 
     prompt_parts = [
         "═══ RESCUE SWARM — COMMAND BRIEFING ═══",
+        f"🏠 Shared Base Station: ({state.get('base_station', {}).get('x', 0)},{state.get('base_station', {}).get('y', 0)})",
         f"📍 Coverage: {stats['coverage_pct']}% | ",
         f"⏱️ ETA to Finish: {stats['eta_ts']}",
         f"⏱️ Elapsed: {stats['elapsed_ts']}",
@@ -233,6 +235,7 @@ class CommandAgent:
     def _rule_based_plan(self) -> Dict[str, List[int]]:
         """Deterministic fallback planner — always produces a valid assignment."""
         sim = shared.sim
+        base_x, base_y = sim.base_station
         assignments: Dict[str, List[int]] = {}
         unscanned: List[List[int]] = sim.get_unscanned_cells()
         used_targets: set = set()
@@ -246,7 +249,7 @@ class CommandAgent:
 
             # Battery critical — recall
             if drone.battery < LOW_BATTERY_THRESHOLD:
-                assignments[drone.id] = [0, 0]
+                assignments[drone.id] = [base_x, base_y]
                 continue
 
             if unscanned:
@@ -263,7 +266,7 @@ class CommandAgent:
                 tx, ty = assignments[drone.id][0], assignments[drone.id][1]
                 sim.log(f"🤖 [ROUTING] {drone.id} moving to ({tx},{ty}) - nearest unscanned cell.", "INFO", drone.id)
             else:
-                assignments[drone.id] = [0, 0]
+                assignments[drone.id] = [base_x, base_y]
 
         if assignments:
             summary = ", ".join(f"{k}→({v[0]},{v[1]})" for k, v in assignments.items())

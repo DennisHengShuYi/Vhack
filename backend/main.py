@@ -61,6 +61,7 @@ class MissionManager:
             if step_count >= max_steps:
                break
             sim = shared.sim  # re-reference after potential reset
+            base_x, base_y = sim.base_station
 
             # ── Mission Completion ────────────────────────────────────────
             survivors = sim.zone.survivors
@@ -72,10 +73,12 @@ class MissionManager:
                     "SUCCESS",
                 )
                 for drone in sim.drones.values():
-                    if (drone.x, drone.y) != (0, 0):
-                        drone.target_x, drone.target_y = 0, 0
+                    drone.base_x, drone.base_y = base_x, base_y
+                    if (drone.x, drone.y) != (base_x, base_y):
+                        drone.target_x, drone.target_y = base_x, base_y
                         drone.returning_to_base = True
                         drone.mission_complete_rtb = True
+                        drone.status = "RETURNING"
                         drone.status_label = "RTB — COMPLETE"
                 sim.mission_active = False
                 break
@@ -90,13 +93,43 @@ class MissionManager:
                     for drone_id, target in plan.items():
                         if drone_id in sim.drones:
                             drone = sim.drones[drone_id]
+                            drone.base_x, drone.base_y = base_x, base_y
                             # Only assign if not in waiting/voice override
                             if not drone.is_waiting_response and not drone.voice_override:
                                 drone.target_x = int(target[0])
                                 drone.target_y = int(target[1])
-                                if target != [0, 0]:
+                                if target != [base_x, base_y]:
                                     drone.returning_to_base = False
                                     drone.mission_complete_rtb = False
+                                    drone.status = "ON_MISSION"
+                                else:
+                                    drone.returning_to_base = True
+                                    drone.status = "RETURNING"
+
+                    # Ensure every available drone is deployed even if AI returns partial plan
+                    unscanned_now = sim.get_unscanned_cells()
+                    for drone in sim.drones.values():
+                        drone.base_x, drone.base_y = base_x, base_y
+                        if drone.is_waiting_response or drone.voice_override or drone.is_charging:
+                            continue
+                        if drone.target_x is not None and drone.target_y is not None:
+                            continue
+                        if sim.should_return_to_base(drone):
+                            drone.target_x, drone.target_y = base_x, base_y
+                            drone.returning_to_base = True
+                            drone.status = "RETURNING"
+                            continue
+                        if unscanned_now:
+                            nearest = min(
+                                unscanned_now,
+                                key=lambda c: abs(c[0] - drone.x) + abs(c[1] - drone.y),
+                            )
+                            drone.target_x, drone.target_y = nearest[0], nearest[1]
+                            drone.status = "ON_MISSION"
+                        else:
+                            drone.target_x, drone.target_y = base_x, base_y
+                            drone.returning_to_base = True
+                            drone.status = "RETURNING"
                 except Exception as e:
                     err_str = str(e)
                     err_trunc = "".join(err_str[k] for k in range(min(80, len(err_str))))
@@ -104,14 +137,16 @@ class MissionManager:
 
             # ── Loop A: Simulation Tick ───────────────────────────────────
             for d_id, drone in list(sim.drones.items()):
+                drone.base_x, drone.base_y = base_x, base_y
 
                 # --- Victim standby: do not move ---
                 if drone.is_waiting_response:
+                    drone.status = "IDLE"
                     drone.status_label = "VICTIM STANDBY"
                     continue
 
                 # --- Auto-charge at base ---
-                if (drone.x, drone.y) == (0, 0) and drone.battery < 100 and (
+                if (drone.x, drone.y) == (base_x, base_y) and drone.battery < 100 and (
                     drone.returning_to_base or drone.is_charging or drone.battery < LOW_BATTERY_THRESHOLD
                 ):
                     if not drone.is_charging:
@@ -123,6 +158,7 @@ class MissionManager:
 
                 # --- No target: wait for AI ---
                 if drone.target_x is None:
+                    drone.status = "IDLE"
                     drone.status_label = "AWAITING ORDERS"
                     continue
 
@@ -130,7 +166,7 @@ class MissionManager:
 
                 # --- Arrived at target ---
                 if drone.x == tx and drone.y == ty:
-                    if tx == 0 and ty == 0:
+                    if tx == base_x and ty == base_y:
                         drone.returning_to_base = True
                         sim.log(f"🤖 [SYSTEM LOGIC] {d_id} returned to base safely. Switching to standby/charge.", "INFO", d_id)
                         sim.charge_step(d_id)
@@ -145,6 +181,7 @@ class MissionManager:
                              drone.voice_override = False
                              drone.original_pos = None
                              drone.target_x = None
+                             drone.status = "IDLE"
                         else:
                             sim.log(f"🤖 [SYSTEM LOGIC] {d_id} reached target ({tx},{ty}). Executing thermal sweep.", "INFO", d_id)
                             # Perform thermal scan
@@ -169,7 +206,7 @@ class MissionManager:
                     for s in sim.zone.survivors:
                         if s["id"] == drone.guiding_victim_id:
                             s["x"], s["y"] = nx, ny
-                            if (nx, ny) == (0, 0):
+                            if (nx, ny) == (base_x, base_y):
                                 s["rescued"] = True
                                 drone.is_guiding = False
                                 drone.guiding_victim_id = None
@@ -177,6 +214,7 @@ class MissionManager:
                                 sim.log(f"Survivor {s['id']} guided safely to base station!", "SUCCESS", d_id)
 
                 drone.battery = max(0.0, drone.battery - BATTERY_DRAIN_MOVE)
+                drone.status = "ON_MISSION"
                 drone.status_label = f"→({tx},{ty})"
 
                 # Track path history
@@ -185,9 +223,10 @@ class MissionManager:
                     drone.path_history.pop(0)
 
                 # Low battery threshold — force RTB
-                if drone.battery < LOW_BATTERY_THRESHOLD and not drone.returning_to_base:
-                    drone.target_x, drone.target_y = 0, 0
+                if sim.should_return_to_base(drone) and not drone.returning_to_base:
+                    drone.target_x, drone.target_y = base_x, base_y
                     drone.returning_to_base = True
+                    drone.status = "RETURNING"
                     sim.log(
                         f"🪫 [SYSTEM LOGIC] {d_id} battery {drone.battery:.0f}% below threshold. Initiating safety RTB protocol.", "WARN", d_id
                     )
@@ -358,7 +397,7 @@ async def voice_command(message: str):
         # Help Gemini understand the user might say "grid 10" or "sector 5"
         parse_prompt = (
             f"You are a rescue dispatcher. Command: '{message}'. "
-            "The search area is a 10x10 grid where x and y are 0-9. (0,0) is the base station. "
+            "The search area is a 10x10 grid where x and y are 0-9. Each drone has its own base coordinates from telemetry. "
             "Rules: "
             "1. If user says 'grid N' (where N is 0-99), map it to x = N % 10, y = N // 10. "
             "2. If user says 'coordinate (X,Y)', map directly. "
