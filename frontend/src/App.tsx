@@ -19,10 +19,13 @@ import {
   Power
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import Map3D from './components/Map3D';
 
 // --- Constants ---
-const API_BASE = "http://127.0.0.1:8005";
+const API_BASE = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8005";
 const GRID_SIZE = 10;
+const POLL_INTERVAL_MS = 800;  // How often to fetch state from backend
+const LOW_BATTERY_PCT = 25;    // Must match LOW_BATTERY_THRESHOLD in simulation.py
 
 // --- Components ---
 
@@ -38,6 +41,7 @@ export default function App() {
   const [activeDroneId, setActiveDroneId] = useState<string | null>(null);
   const [logFilter, setLogFilter] = useState<'all' | 'warn' | 'error' | 'victim_found' | 'ai'>('all');
   const [showRtbOnly, setShowRtbOnly] = useState(false);
+  const [is3DView, setIs3DView] = useState(false);
 
   const logEndRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<any>(null);
@@ -56,7 +60,7 @@ export default function App() {
     };
 
     fetchData();
-    const interval = setInterval(fetchData, 800);
+    const interval = setInterval(fetchData, POLL_INTERVAL_MS);
     return () => clearInterval(interval);
   }, []);
 
@@ -212,6 +216,9 @@ export default function App() {
               {isDeploying ? <RefreshCcw className="animate-spin" size={16} /> : "DEPLOY SWARM"}
             </button>
           )}
+          <button className={`cyber-button toggle-3d ${is3DView ? 'active' : ''}`} onClick={() => setIs3DView(p => !p)}>
+            3D VIEW
+          </button>
           <button className="cyber-button secondary" onClick={resetMission}>RESET</button>
         </div>
       </header>
@@ -240,40 +247,40 @@ export default function App() {
                   <span className="telemetry-count">{displayedDrones.length} drone(s)</span>
                 </div>
                 <div className="drone-list">
-                {displayedDrones.map((drone: any) => (
-                  <motion.div
-                    key={drone.id}
-                    className={`drone-card ${activeDroneId === drone.id ? 'active' : ''} ${drone.is_waiting_response ? 'alert' : ''}`}
-                    whileHover={{ scale: 1.02 }}
-                    onClick={() => setActiveDroneId(drone.id)}
-                  >
-                    <div className="drone-card-header">
-                      <span className="drone-id font-mono">{drone.id}</span>
-                      <div className="flex-row gap-2 items-center">
-                        <span className="text-xs opacity-60">{drone.battery.toFixed(0)}%</span>
-                        <div className={`status-dot ${drone.status_label.toLowerCase().replace(/ /g, '-')}`}></div>
+                  {displayedDrones.map((drone: any) => (
+                    <motion.div
+                      key={drone.id}
+                      className={`drone-card ${activeDroneId === drone.id ? 'active' : ''} ${drone.is_waiting_response ? 'alert' : ''}`}
+                      whileHover={{ scale: 1.02 }}
+                      onClick={() => setActiveDroneId(drone.id)}
+                    >
+                      <div className="drone-card-header">
+                        <span className="drone-id font-mono">{drone.id}</span>
+                        <div className="flex-row gap-2 items-center">
+                          <span className="text-xs opacity-60">{drone.battery.toFixed(0)}%</span>
+                          <div className={`status-dot ${drone.status_label.toLowerCase().replace(/ /g, '-')}`}></div>
+                        </div>
                       </div>
-                    </div>
-                    <div className="drone-card-body">
-                      <div className="drone-telemetry">
-                        <div className="tel-row">
-                          <Battery size={14} />
-                          <div className="battery-bar-container">
-                            <div className={`battery-fill ${drone.battery < 30 ? 'critical' : ''}`} style={{ width: `${drone.battery}%` }}></div>
+                      <div className="drone-card-body">
+                        <div className="drone-telemetry">
+                          <div className="tel-row">
+                            <Battery size={14} />
+                            <div className="battery-bar-container">
+                              <div className={`battery-fill ${drone.battery < LOW_BATTERY_PCT ? 'critical' : ''}`} style={{ width: `${drone.battery}%` }}></div>
+                            </div>
+                            <span className="font-mono text-xs">{drone.battery.toFixed(0)}%</span>
                           </div>
-                          <span className="font-mono text-xs">{drone.battery.toFixed(0)}%</span>
-                        </div>
-                        <div className="tel-row">
-                          <Navigation size={14} />
-                          <span className="font-mono text-xs">POS: ({drone.x}, {drone.y}) | {drone.terrain?.toUpperCase()}</span>
-                        </div>
-                        <div className={`status-chip ${drone.status_label.toLowerCase().replace(/ /g, '-').replace(/[^a-z0-9-]/g, '')}`}>
-                          {drone.status_label}
+                          <div className="tel-row">
+                            <Navigation size={14} />
+                            <span className="font-mono text-xs">POS: ({drone.x}, {drone.y}) | {drone.terrain?.toUpperCase()}</span>
+                          </div>
+                          <div className={`status-chip ${drone.status_label.toLowerCase().replace(/ /g, '-').replace(/[^a-z0-9-]/g, '')}`}>
+                            {drone.status_label}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  </motion.div>
-                ))}
+                    </motion.div>
+                  ))}
                 </div>
               </div>
             ) : (
@@ -286,14 +293,14 @@ export default function App() {
                   <button className={`log-filter-btn ${logFilter === 'ai' ? 'active' : ''}`} onClick={() => setLogFilter('ai')}>AI</button>
                 </div>
                 <div className="mission-log font-mono">
-                {filteredLog.map((entry: any) => (
-                  <div key={entry.id} className={`log-entry ${entry.level.toLowerCase()}`}>
-                    <span className="log-ts">[{entry.ts}]</span>
-                    {entry.drone && <span className="log-drone">[{entry.drone}]</span>}
-                    <span className="log-text">{entry.text}</span>
-                  </div>
-                ))}
-                <div ref={logEndRef} />
+                  {filteredLog.map((entry: any) => (
+                    <div key={entry.id} className={`log-entry ${entry.level.toLowerCase()}`}>
+                      <span className="log-ts">[{entry.ts}]</span>
+                      {entry.drone && <span className="log-drone">[{entry.drone}]</span>}
+                      <span className="log-text">{entry.text}</span>
+                    </div>
+                  ))}
+                  <div ref={logEndRef} />
                 </div>
               </div>
             )}
@@ -301,54 +308,90 @@ export default function App() {
 
         </section>
 
-        {/* Center: Tactical Map */}
-        <section className="center-map glass">
+        {/* Center: Map */}
+        <section className={`center-map glass ${is3DView ? 'view-3d' : ''}`}>
           <div className="map-overlay-header">
-            <span className="font-mono text-xs"><Crosshair size={12} /> TACTICAL OVERLAY</span>
+            <span className="font-mono text-xs"><Crosshair size={12} /> OVERLAY</span>
             <div className="legend">
-              <span className="legend-item"><div className="dot base"></div> BASE</span>
-              <span className="legend-item"><div className="dot scanned"></div> SCANNED</span>
-              <span className="legend-item"><div className="dot victim"></div> VICTIM</span>
-              <span className="legend-item"><div className="dot hazard"></div> HAZARD</span>
+              {is3DView ? (
+                <>
+                  <span className="legend-item"><div className="dot" style={{ background: '#4b6b4f' }}></div> FLAT</span>
+                  <span className="legend-item"><div className="dot" style={{ background: '#55806a' }}></div> SCANNED</span>
+                  <span className="legend-item"><div className="dot" style={{ background: '#6b5f7f' }}></div> MOUNTAIN</span>
+                  <span className="legend-item"><div className="dot" style={{ background: '#355f8b' }}></div> LAKE</span>
+                  <span className="legend-item"><div className="dot" style={{ background: '#7c2f2f' }}></div> HAZARD</span>
+                  <span className="legend-item"><div className="dot" style={{ background: '#00f3ff' }}></div> BASE</span>
+                  <span className="legend-item"><div className="dot" style={{ background: '#ffb300' }}></div> VICTIM</span>
+                </>
+              ) : (
+                <>
+                  <span className="legend-item"><div className="dot base"></div> BASE</span>
+                  <span className="legend-item"><div className="dot scanned"></div> SCANNED</span>
+                  <span className="legend-item"><div className="dot victim"></div> VICTIM</span>
+                  <span className="legend-item"><div className="dot hazard"></div> HAZARD</span>
+                </>
+              )}
             </div>
           </div>
 
-          <div className="grid-container">
-            {Array.from({ length: GRID_SIZE * GRID_SIZE }).map((_, i) => {
-              const x = i % GRID_SIZE;
-              const y = Math.floor(i / GRID_SIZE);
-              const isScanned = zone.scanned_cells[y][x];
-              const isHazard = zone.hazard_cells[y][x];
-              const terrain = zone.terrain_types[y][x];
-              const droneAtPos = drones.find((d: any) => d.x === x && d.y === y);
-              const isDroneReturning = droneAtPos ? isReturningDrone(droneAtPos) : false;
-              const survivorFound = zone.survivors.find((s: any) => s.x === x && s.y === y && s.found && !s.rescued);
+          {is3DView ? (
+            <div className="map-3d-wrapper" style={{ flex: 1, position: 'relative', borderRadius: '8px', overflow: 'hidden', border: '1px solid rgba(0, 243, 255, 0.2)' }}>
+              <Map3D
+                zone={zone}
+                drones={drones || []}
+                baseX={baseX}
+                baseY={baseY}
+                showRtbOnly={showRtbOnly}
+              />
+            </div>
+          ) : (
+            <div className="grid-container">
+              {Array.from({ length: GRID_SIZE * GRID_SIZE }).map((_, i) => {
+                const x = i % GRID_SIZE;
+                const y = Math.floor(i / GRID_SIZE);
+                const isScanned = zone.scanned_cells[y][x];
+                const isHazard = zone.hazard_cells[y][x];
+                const terrain = zone.terrain_types[y][x];
+                const droneAtPos = drones.find((d: any) => d.x === x && d.y === y);
+                const isDroneReturning = droneAtPos ? isReturningDrone(droneAtPos) : false;
+                const survivorFound = zone.survivors.find((s: any) => s.x === x && s.y === y && s.found && !s.rescued);
 
-              return (
-                <div key={i} className={`grid-cell ${isScanned ? 'scanned' : ''} ${isHazard ? 'hazard' : ''} terrain-${terrain}`}>
-                  <AnimatePresence>
-                    {survivorFound && (
-                      <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} className="survivor-icon">
-                        <Crosshair className="animate-pulse" size={16} />
+                return (
+                  <div key={i} className={`grid-cell ${isScanned ? 'scanned' : ''} ${isHazard ? 'hazard' : ''} terrain-${terrain}`}>
+                    <AnimatePresence>
+                      {survivorFound && (
+                        <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} className="survivor-icon" style={{ position: 'absolute', zIndex: 12 }}>
+                          <div className="content-wrapper">
+                            <Crosshair className="animate-pulse" size={16} />
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+
+                    {droneAtPos && (
+                      <motion.div
+                        layoutId={`drone-${droneAtPos.id}`}
+                        className={`drone-marker ${droneAtPos.is_waiting_response ? 'special' : ''} ${isDroneReturning ? 'returning' : ''} ${showRtbOnly && !isDroneReturning ? 'dimmed' : ''}`}
+                        title={droneAtPos.id}
+                      >
+                        <div className="content-wrapper">
+                          <Cpu size={14} />
+                          <span className="d-label font-mono">{droneAtPos.id.split('-')[1]}</span>
+                        </div>
                       </motion.div>
                     )}
-                  </AnimatePresence>
-
-                  {droneAtPos && (
-                    <motion.div
-                      layoutId={`drone-${droneAtPos.id}`}
-                      className={`drone-marker ${droneAtPos.is_waiting_response ? 'special' : ''} ${isDroneReturning ? 'returning' : ''} ${showRtbOnly && !isDroneReturning ? 'dimmed' : ''}`}
-                      title={droneAtPos.id}
-                    >
-                      <Cpu size={14} />
-                      <span className="d-label font-mono">{droneAtPos.id.split('-')[1]}</span>
-                    </motion.div>
-                  )}
-                  {x === baseX && y === baseY && <Power size={14} className="base-icon" />}
-                </div>
-              );
-            })}
-          </div>
+                    {x === baseX && y === baseY && (
+                      <div className="base-icon" style={{ position: 'absolute', zIndex: 5 }}>
+                        <div className="content-wrapper">
+                          <Power size={14} />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </section>
 
         {/* Right Side: Drone Feeds & Triage */}
@@ -358,16 +401,19 @@ export default function App() {
           </div>
 
           <div className="sensor-matrix-grid glass">
-            {activeDroneId ? (
+            {(() => {
+              const selectedDrone = activeDroneId ? drones.find((d: any) => d.id === activeDroneId) : null;
+              if (!selectedDrone) return (<div className="sensor-placeholder"><Waves className="animate-pulse" /><span>SELECT DRONE FOR SENSOR LINK</span></div>);
+              return (
               <div className="drone-detailed-sensor">
                 <div className="sensor-meta">
                   <span className="font-mono text-cyan">{activeDroneId}</span>
-                  <span className="font-mono text-muted text-xs">MODEL 1404-T</span>
+                  <span className="font-mono text-muted text-xs">UNIT {activeDroneId?.split('-')[1] ?? '?'} • MK-IV</span>
                 </div>
                 <div className="thermal-preview glass">
-                  {drones.find((d: any) => d.id === activeDroneId)?.last_thermal_matrix ? (
+                  {selectedDrone?.last_thermal_matrix ? (
                     <div className="thermal-matrix">
-                      {drones.find((d: any) => d.id === activeDroneId).last_thermal_matrix.flatMap((row: any) => row).map((val: number, idx: number) => (
+                      {selectedDrone.last_thermal_matrix.flatMap((row: any) => row).map((val: number, idx: number) => (
                         <div key={idx} className="thermal-pixel" style={{ backgroundColor: `rgba(255, ${val * 1.5}, 0, ${val / 100})` }}></div>
                       ))}
                     </div>
@@ -376,18 +422,14 @@ export default function App() {
                   )}
                 </div>
                 <div className="sensor-readouts glass">
-                  <Readout label="ALTITUDE" value="4.2m" />
-                  <Readout label="WIND VELOC" value="12 kph" />
-                  <Readout label="PITCH/YAW" value="+2.0 / -0.4" />
-                  <Readout label="ENCRYPTION" value="AES-256-S" />
+                  <Readout label="BATTERY" value={selectedDrone ? `${selectedDrone.battery.toFixed(1)}%` : 'N/A'} />
+                  <Readout label="POSITION" value={selectedDrone ? `(${selectedDrone.x}, ${selectedDrone.y})` : 'N/A'} />
+                  <Readout label="STATUS" value={selectedDrone?.status_label ?? 'N/A'} />
+                  <Readout label="TERRAIN" value={selectedDrone?.terrain?.toUpperCase() ?? 'N/A'} />
                 </div>
               </div>
-            ) : (
-              <div className="sensor-placeholder">
-                <Waves className="animate-pulse" />
-                <span>SELECT DRONE FOR SENSOR LINK</span>
-              </div>
-            )}
+              );
+            })()}
           </div>
 
           <div className="active-mission-stats glass">
@@ -420,7 +462,7 @@ export default function App() {
                 <AlertTriangle className="animate-pulse text-amber" />
                 <span className="font-bold">S.O.S CONTACT: {waitingDrone.id}</span>
               </div>
-              
+
               <div className="victim-report font-mono">
                 {waitingDrone.victim_report}
               </div>
@@ -649,7 +691,25 @@ export default function App() {
           background: rgba(255,255,255,0.02);
           border: 1px solid rgba(255,255,255,0.1);
           padding: 2px;
+          transition: transform 0.8s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.8s ease, border 0.8s ease, clip-path 0.8s ease;
+          transform-style: preserve-3d;
         }
+
+        .center-map.view-3d {
+          perspective: 1200px;
+        }
+
+        .center-map.view-3d .grid-container {
+          transform: rotateX(60deg) rotateZ(-45deg);
+          box-shadow: -20px 30px 40px rgba(0,0,0,0.6);
+          border: 1px solid rgba(0, 243, 255, 0.4);
+          transform-origin: center center;
+          align-self: center;
+          justify-self: center;
+          width: 80%;
+          margin: 20px auto;
+        }
+
         .grid-cell {
           background: rgba(20, 20, 40, 0.4);
           position: relative;
@@ -657,16 +717,49 @@ export default function App() {
           align-items: center;
           justify-content: center;
           border: 1px solid rgba(255,255,255,0.01);
+          transform-style: preserve-3d;
+          transition: transform 0.6s cubic-bezier(0.34, 1.56, 0.64, 1), background-color 0.3s, box-shadow 0.6s;
         }
         .grid-cell.scanned { background: rgba(0, 243, 255, 0.08); }
         .grid-cell.hazard { background: rgba(255, 61, 61, 0.15); }
         
         .grid-cell.terrain-mountain { border: 1px solid rgba(139, 92, 246, 0.2); background: rgba(139, 92, 246, 0.05); }
         .grid-cell.terrain-lake { border: 1px solid rgba(59, 130, 246, 0.2); background: rgba(59, 130, 246, 0.1); }
-        .grid-cell.terrain-mountain::after { content: '▲'; position: absolute; opacity: 0.2; font-size: 8px; top: 2px; right: 2px; }
-        .grid-cell.terrain-lake::after { content: '≈'; position: absolute; opacity: 0.2; font-size: 10px; top: 0px; right: 2px; }
+        
+        .center-map:not(.view-3d) .grid-cell.terrain-mountain::after { content: '▲'; position: absolute; opacity: 0.2; font-size: 8px; top: 2px; right: 2px; }
+        .center-map:not(.view-3d) .grid-cell.terrain-lake::after { content: '≈'; position: absolute; opacity: 0.2; font-size: 10px; top: 0px; right: 2px; }
+
+        .center-map.view-3d .grid-cell { border: 1px solid rgba(255,255,255,0.03); }
+        .center-map.view-3d .grid-cell.terrain-mountain {
+          transform: translateZ(30px);
+          box-shadow: -4px 4px 10px rgba(0,0,0,0.8), inset 0 0 10px rgba(139, 92, 246, 0.3);
+          background: rgba(139, 92, 246, 0.2);
+        }
+        .center-map.view-3d .grid-cell.terrain-lake {
+          transform: translateZ(-10px);
+          box-shadow: inset 0 0 15px rgba(59, 130, 246, 0.5);
+        }
 
         .grid-cell:hover { background: rgba(255,255,255,0.05); }
+
+        .content-wrapper {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          transition: transform 0.8s cubic-bezier(0.34, 1.56, 0.64, 1);
+          transform-style: preserve-3d;
+        }
+
+        .center-map.view-3d .content-wrapper {
+          transform: rotateZ(45deg) rotateX(-60deg) translateY(-15px);
+          filter: drop-shadow(-8px 10px 6px rgba(0,0,0,0.6));
+        }
+
+        /* Tweak for drone and victim icon hovering logic in 3D */
+        .center-map.view-3d .survivor-icon .content-wrapper {
+          transform: rotateZ(45deg) rotateX(-60deg) translateY(-25px);
+        }
 
         .drone-marker {
           width: 30px; height: 30px; background: rgba(0, 243, 255, 0.8); color: black;
@@ -679,6 +772,8 @@ export default function App() {
         .d-label { font-size: 0.7rem; line-height: 1; font-weight: bold; }
         .survivor-icon { color: var(--accent-amber); filter: drop-shadow(0 0 8px var(--accent-amber)); }
         .base-icon { color: var(--accent-cyan); opacity: 0.5; }
+        .toggle-3d { margin-left: 1rem; margin-right: 15px; border-color: rgba(255,255,255,0.2); }
+        .toggle-3d.active { background: rgba(0,243,255,0.15); border-color: var(--accent-cyan); color: var(--accent-cyan); box-shadow: 0 0 10px rgba(0,243,255,0.3); }
 
         .detail-panel { display: flex; flex-direction: column; gap: 1rem; }
         .sensor-matrix-grid { flex: 1; display: flex; flex-direction: column; padding: 1rem; }

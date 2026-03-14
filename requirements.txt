@@ -4,3 +4,10 @@ python-dotenv
 openai
 fastmcp
 pydantic
+@react-three/drei
+@react-three/fiber
+framer-motion
+lucide-react
+react
+react-dom
+three
