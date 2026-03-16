@@ -1,4 +1,7 @@
-fastmcp==0.1.0 # Or whichever version is the latest in 2026/2025
-mcp
-uvicorn
 fastapi
+uvicorn
+fastmcp
+mcp
+pydantic
+python-dotenv
+openai

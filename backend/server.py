@@ -1,345 +1,622 @@
-import asyncio
-import json
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import uvicorn
-from fastmcp import FastMCP
-from typing import Dict, Any, List
-from simulation import SimulationEngine, DroneStatus, CellState
+"""
+RescueSwarm Backend — FastMCP stdio + FastAPI REST server.
 
-# Initialize the MCP Server
+Architecture:
+  - FastMCP stdio server (main thread): exposes MCP tools for the LangChain agent
+  - FastAPI (background thread): REST endpoints polled by the React frontend
+  - Shared state (shared.sim): single SimulationState instance used by both
+
+Loop A (Simulation Ticker, every 0.7s — inside FastAPI event loop):
+  - Moves drones along path queues / toward targets
+  - Executes thermal scans on arrival
+  - Manages charging, battery emergency RTB
+  - Detects victim standby states
+
+Loop B (AI Planning — handled externally by agent/agent.py via MCP):
+  - Agent polls get_idle_drones(), invokes GPT-4o via LangChain
+  - Calls assign_scan_zone() / return_to_base() MCP tools
+"""
+import asyncio
+import os
+import sys
+import json
+import time
+import threading
+from contextlib import asynccontextmanager
+from typing import Optional, Any
+
+import uvicorn
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastmcp import FastMCP
+from dotenv import load_dotenv
+
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
+
+import shared
+from simulation import SimulationState, ZoneStatus, chebyshev, LOW_BATTERY_THRESHOLD
+
+# ─── FastMCP Server ────────────────────────────────────────────────────────────
 mcp = FastMCP("DroneCommandServer")
 
-# Initialize the global simulation state
-sim_engine = SimulationEngine()
-simulation_active = False
+SIM_TICK = 0.7  # seconds between simulation steps
 
-# -------------------------------------------------------------------
-# WebSocket Connection Manager
-# -------------------------------------------------------------------
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
 
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-        # Send initial state
-        await self.broadcast_state()
-
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-
-    async def broadcast_state(self):
-        # Package the grid and drones for the frontend
-        state = {
-            "type": "state_update",
-            "grid": [[{"state": cell["state"].name, "priority": cell["priority"].name} for cell in row] for row in sim_engine.grid],
-            "drones": {d_id: {"x": d.x, "y": d.y, "battery": d.battery, "status": d.status.name} for d_id, d in sim_engine.drones.items()},
-            "survivors_found": len(sim_engine.survivors),
-            "total_survivors": len(sim_engine.simulated_survivor_locations),
-            "hidden_survivors": sim_engine.simulated_survivor_locations # True locations for initial visibility
-        }
-        dead_connections = []
-        for connection in self.active_connections:
-            try:
-                await connection.send_json(state)
-            except Exception:
-                dead_connections.append(connection)
-        
-        for dead in dead_connections:
-            self.active_connections.remove(dead)
-            
-    async def broadcast_log(self, log_msg: str, is_stream: bool = False):
-        payload = {"type": "log", "message": log_msg}
-        if is_stream:
-            payload["is_stream"] = True
-        for connection in self.active_connections:
-            try:
-                await connection.send_json(payload)
-            except Exception:
-                pass
-
-manager = ConnectionManager()
-
-# -------------------------------------------------------------------
-# Background Simulation Tick
-# -------------------------------------------------------------------
+# ─── Simulation Tick Loop (Loop A) ────────────────────────────────────────────
 async def run_simulation_loop():
-    global simulation_active
+    """Advances the simulation one step at a time. No AI logic — handled by agent via MCP."""
     while True:
-        if simulation_active:
-            sim_engine.tick_simulation()
-            await manager.broadcast_state()
-        await asyncio.sleep(1.0) # Tick every 1 second
+        sim = shared.sim
+        if sim.mission_active:
+            base_x, base_y = sim.base_station
 
+            # Mission completion check
+            survivors = sim.zone.survivors
+            if survivors and all(s["rescued"] for s in survivors):
+                sim.log("🏁 MISSION ACCOMPLISHED — All survivors extracted!", "SUCCESS")
+                coverage = sim.get_status()["stats"]["coverage_pct"]
+                sim.log(
+                    f"📊 Final Stats: Coverage {coverage}% | "
+                    f"Rescued {sim.total_rescued}/{len(survivors)} survivors",
+                    "SUCCESS",
+                )
+                for drone in sim.drones.values():
+                    drone.base_x, drone.base_y = base_x, base_y
+                    if (drone.x, drone.y) != (base_x, base_y):
+                        drone.target_x, drone.target_y = base_x, base_y
+                        drone.returning_to_base = True
+                        drone.mission_complete_rtb = True
+                        drone.status = "RETURNING"
+                        drone.status_label = "RTB — COMPLETE"
+                sim.mission_active = False
+
+            # Loop A: advance each drone one step
+            if sim.mission_active:
+                for d_id, drone in list(sim.drones.items()):
+                    drone.base_x, drone.base_y = base_x, base_y
+
+                    # Victim standby — drone waits for operator
+                    if drone.is_waiting_response:
+                        drone.status = "IDLE"
+                        drone.status_label = "VICTIM STANDBY"
+                        continue
+
+                    # Auto-charge at base
+                    if (drone.x, drone.y) == (base_x, base_y) and drone.battery < 100 and (
+                        drone.returning_to_base or drone.is_charging or drone.battery < LOW_BATTERY_THRESHOLD
+                    ):
+                        if not drone.is_charging:
+                            sim.log(f"🤖 {d_id} arrived at base. Commencing recharge.", "INFO", d_id)
+                        sim.charge_step(d_id)
+                        if not drone.is_charging:
+                            drone.returning_to_base = False
+                        continue
+
+                    # No target and empty path — awaiting zone assignment from agent
+                    if drone.target_x is None and not drone.path_queue:
+                        drone.status = "IDLE"
+                        drone.status_label = "AWAITING ORDERS"
+                        if drone.assigned_zone_id:
+                            zid = drone.assigned_zone_id
+                            if zid in sim.zone.zones:
+                                sim.zone.zones[zid].status = ZoneStatus.COMPLETE
+                                sim.log(f"✅ Zone {zid} search complete.", "SUCCESS", d_id)
+                            drone.assigned_zone_id = None
+                        continue
+
+                    # Movement: use path_queue if available, else step toward target_x/y
+                    if drone.path_queue:
+                        nx, ny = drone.path_queue.pop(0)
+                        tx, ty = nx, ny
+                    else:
+                        tx, ty = drone.target_x, drone.target_y
+                        nx, ny = drone.x, drone.y
+                        if nx != tx:
+                            nx += 1 if tx > nx else -1
+                        elif ny != ty:
+                            ny += 1 if ty > ny else -1
+
+                    # Arrived at current step target
+                    if drone.x == nx and drone.y == ny and not drone.path_queue:
+                        if nx == base_x and ny == base_y:
+                            drone.returning_to_base = True
+                            sim.log(f"🤖 {d_id} returned to base. Switching to charge.", "INFO", d_id)
+                            sim.charge_step(d_id)
+                        else:
+                            if drone.voice_override and drone.original_pos and (nx, ny) != tuple(drone.original_pos):
+                                sim.log(f"✅ {d_id} reached voice target ({nx},{ny}). Scanning then returning.", "SUCCESS", d_id)
+                                sim.scan(d_id)
+                                drone.target_x, drone.target_y = drone.original_pos[0], drone.original_pos[1]
+                            elif drone.voice_override and drone.original_pos and (nx, ny) == tuple(drone.original_pos):
+                                sim.log(f"🏠 {d_id} returned to original position. Resuming autonomous mission.", "INFO", d_id)
+                                drone.voice_override = False
+                                drone.original_pos = None
+                                drone.target_x = None
+                                drone.status = "IDLE"
+                            else:
+                                result = sim.scan(d_id)
+                                if "THERMAL MATCH" not in result and "VICTIM_DETECTED" not in result:
+                                    drone.target_x = None
+                            drone.status_label = "SCANNED"
+                        continue
+
+                    # Execute move
+                    drone.x, drone.y = nx, ny
+
+                    # Guide victim moves with drone
+                    if drone.is_guiding and drone.guiding_victim_id:
+                        for s in sim.zone.survivors:
+                            if s["id"] == drone.guiding_victim_id:
+                                s["x"], s["y"] = nx, ny
+                                if (nx, ny) == (base_x, base_y):
+                                    s["rescued"] = True
+                                    drone.is_guiding = False
+                                    drone.guiding_victim_id = None
+                                    sim.total_rescued += 1
+                                    sim.log(f"Survivor guided safely to base station!", "SUCCESS", d_id)
+
+                    # Battery drain
+                    drone.battery = max(0.0, drone.battery - 1.0)
+                    drone.status = "ON_MISSION"
+                    drone.status_label = f"→({tx},{ty})"
+
+                    # Path history for trail visualization
+                    drone.path_history.append([nx, ny])
+                    while len(drone.path_history) > 12:
+                        drone.path_history.pop(0)
+
+                    # Low battery → force RTB
+                    if sim.should_return_to_base(drone) and not drone.returning_to_base:
+                        if drone.assigned_zone_id:
+                            sim.release_zone(drone.assigned_zone_id)
+                            sim.log(f"⚠️ {d_id} aborting zone {drone.assigned_zone_id} — low battery.", "WARN", d_id)
+                            drone.assigned_zone_id = None
+                        drone.path_queue = []
+                        drone.target_x, drone.target_y = base_x, base_y
+                        drone.returning_to_base = True
+                        drone.status = "RETURNING"
+                        sim.log(f"🪫 {d_id} battery {drone.battery:.0f}% critical. Initiating RTB.", "WARN", d_id)
+
+                    # Opportunistic scan while passing through unscanned cell
+                    if not sim.zone.scanned_cells[ny][nx]:
+                        sim.scan(d_id)
+
+        await asyncio.sleep(SIM_TICK)
+
+
+# ─── FastAPI App ───────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Start the simulation loop when the FastAPI server starts
     loop_task = asyncio.create_task(run_simulation_loop())
     yield
     loop_task.cancel()
 
-# Initialize FastAPI
-app = FastAPI(lifespan=lifespan)
 
-# Allow CORS for the frontend
+app = FastAPI(
+    title="RescueSwarm API",
+    description="First Responder Swarm Intelligence — MCP + FastAPI",
+    version="2.0.0",
+    lifespan=lifespan,
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False, # Must be False if allow_origins is ["*"]
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# -------------------------------------------------------------------
-# FastAPI Endpoints for UI Controls
-# -------------------------------------------------------------------
 
-@app.get("/")
-async def health_check():
-    return {"status": "ok", "message": "Drone Swarm Backend is running."}
+@app.get("/state")
+async def get_state():
+    """Return full simulation state: drones, zone, log, stats."""
+    return shared.sim.get_status()
 
-class StartParams(BaseModel):
-    survivor_count: int
 
-class LogMessage(BaseModel):
-    text: str
-    is_stream: bool = False
+@app.post("/run-mission")
+async def run_mission():
+    """Activate the swarm — simulation tick loop starts moving drones."""
+    sim = shared.sim
+    if sim.mission_active:
+        return {"status": "Mission already active", "running": True}
+    sim.mission_active = True
+    sim.mission_start_time = time.time()
+    sim.log("═══ RESCUE SWARM INTELLIGENCE ACTIVATED ═══", "SUCCESS")
+    sim.log("📡 MCP channel open | 🛰️ Fleet online | 🧠 SENTINEL AI ready", "INFO")
+    return {
+        "status": "SWARM DEPLOYED — SENTINEL AI + MCP Active",
+        "drones": list(sim.drones.keys()),
+        "running": True,
+    }
 
-@app.post("/start")
-async def start_simulation(params: StartParams):
-    global sim_engine, simulation_active
-    # Reinitialize a fresh simulation environment with optimized rectangular grid
-    sim_engine = SimulationEngine(width=20, height=15, num_survivors=params.survivor_count)
-    sim_engine.spawn_drone("drone_1", 0, 0)
-    sim_engine.spawn_drone("drone_2", 19, 0)
-    sim_engine.spawn_drone("drone_3", 0, 14)
-    simulation_active = True
-    await manager.broadcast_log(f"Simulation started. {params.survivor_count} survivors hidden.")
-    return {"status": "started"}
 
-@app.post("/stop")
-async def stop_simulation():
-    global simulation_active
-    simulation_active = False
-    await manager.broadcast_log("Simulation manually stopped.")
-    return {"status": "stopped"}
+@app.post("/stop-mission")
+async def stop_mission():
+    """Halt the active search mission."""
+    shared.sim.mission_active = False
+    shared.sim.log("🛑 MISSION HALTED BY OPERATOR", "WARN")
+    return {"status": "Mission stopped"}
+
+
+@app.post("/reset")
+async def reset_mission(num_victims: int = 0):
+    """Reset simulation and reinitialize with new disaster layout."""
+    shared.sim = SimulationState(num_victims=num_victims)
+    return {"status": "Simulation reset — new disaster zone generated"}
+
 
 @app.post("/log")
-async def receive_agent_log(msg: LogMessage):
-    # The agent posts its thoughts here so we can broadcast them to WebSockets
-    await manager.broadcast_log(msg.text, is_stream=msg.is_stream)
-    return {"status": "ok"}
+async def add_log(text: str, level: str = "AI", drone_id: Optional[str] = None):
+    """Agent posts its reasoning here to appear in the mission log."""
+    shared.sim.log(text, level, drone_id)
+    return {"status": "Logged"}
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
+
+@app.post("/victim-response")
+async def victim_response(drone_id: str, operator_message: Optional[str] = None):
+    """
+    Operator confirms rescue and optionally sends triage message.
+    AI parses any location intel in the message via llm_gateway.
+    """
+    import llm_gateway
+    sim = shared.sim
+    drone = sim.drones.get(drone_id)
+    if not drone:
+        return {"error": f"Drone {drone_id} not found"}
+
+    if operator_message and operator_message.strip():
+        sim.log(f"🎙️ VERBAL INPUT: \"{operator_message}\"", "VERBAL", drone_id)
+        try:
+            parse_prompt = (
+                f"You are a rescue dispatcher. Victim at current position said: '{operator_message}'. "
+                "Task: If they mention a location of OTHER survivors (e.g. 'family at (5,6)', 'grid 10', '10,10' or 'sector 2-3'), "
+                "extract the coordinates [x, y] as integers 0-9. "
+                "Instructions: "
+                "1. Grid is 10x10. If they say '10,10' map to (9,9). "
+                "2. If they say 'Grid N' (0-99), N%10 is x, N//10 is y. "
+                "3. If they say 'middle' infer (4,4). "
+                "Output JSON: {\"target\": [x, y], \"reason\": \"...\"}  or if no location mentioned, output {}."
+            )
+            p_resp = await asyncio.wait_for(
+                asyncio.to_thread(
+                    llm_gateway.completion,
+                    messages=[{"role": "user", "content": parse_prompt}]
+                ),
+                timeout=12.0,
+            )
+            json_str = p_resp.choices[0].message.content.strip().replace("```json", "").replace("```", "").strip()
+            data = json.loads(json_str)
+            if data.get("target"):
+                tx, ty = data["target"]
+                reason = data.get("reason", "Reported coordinate")
+                sim.add_victim(tx, ty, f"Survivor intel: {reason}")
+                sim.log(f"AI INTEL PARSED: Target ({tx},{ty}) identified from speech. Reason: {reason}", "AI", drone_id)
+        except Exception as e:
+            sim.log(f"Intel parsing error: {e}", "ERROR", drone_id)
+
+        try:
+            victim_ctx = drone.victim_report or "Unknown situation"
+            triage_prompt = (
+                f"EMERGENCY TRIAGE. Case: '{victim_ctx}'. Victim said: '{operator_message}'. "
+                "Give exactly ONE sentence: triage priority (P1/P2/P3) and next action."
+            )
+            resp = await asyncio.wait_for(
+                asyncio.to_thread(
+                    llm_gateway.completion,
+                    messages=[{"role": "user", "content": triage_prompt}]
+                ),
+                timeout=10.0,
+            )
+            sim.log(f"TRIAGE AI: {resp.choices[0].message.content.strip()}", "AI", drone_id)
+        except Exception as e:
+            sim.log(f"Triage AI error: {e}", "ERROR", drone_id)
+
+    result = sim.rescue_victim(drone_id)
+    if drone:
+        drone.is_waiting_response = False
+        drone.victim_report = None
+        drone.target_x = None
+        drone.status_label = "RESUMING"
+
+    return {"status": "Drone resumed", "result": result}
+
+
+@app.post("/guide-victim")
+async def guide_victim(drone_id: str):
+    """Command a drone to guide the mobile survivor at its location to base."""
+    result = shared.sim.guide_victim(drone_id)
+    return {"status": "Guide command issued", "result": result}
+
+
+@app.post("/voice-command")
+async def voice_command(message: str):
+    """
+    Handle global voice commands — AI parses target coordinates and reroutes nearest drone.
+    Example: 'Move closest drone to grid 10'
+    """
+    import llm_gateway
+    sim = shared.sim
+    sim.log(f"🎙️ GLOBAL VOICE: '{message}'", "VERBAL")
+
     try:
-        while True:
-            # Keep connection alive
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
+        parse_prompt = (
+            f"You are a rescue dispatcher. Command: '{message}'. "
+            "The search area is a 10x10 grid where x and y are 0-9. "
+            "Rules: "
+            "1. If user says 'grid N' (where N is 0-99), map it to x = N % 10, y = N // 10. "
+            "2. If user says 'coordinate (X,Y)', map directly. "
+            "3. If user says 'sector' or vague location, infer best [x, y]. "
+            "Return JSON: {\"target\": [x, y], \"reason\": \"...\"} "
+            "or {} if the message is not a movement command."
+        )
+        p_resp = await asyncio.wait_for(
+            asyncio.to_thread(
+                llm_gateway.completion,
+                messages=[{"role": "user", "content": parse_prompt}]
+            ),
+            timeout=12.0,
+        )
+        json_str = p_resp.choices[0].message.content.strip().replace("```json", "").replace("```", "").strip()
+        data = json.loads(json_str)
 
-# -------------------------------------------------------------------
-# MCP Tools Exposed to the Agent
-# -------------------------------------------------------------------
+        if data.get("target"):
+            tx, ty = data["target"]
+            tx = max(0, min(9, tx))
+            ty = max(0, min(9, ty))
+            if sim.is_inaccessible(tx, ty):
+                accessible_cells = sim.get_unscanned_cells()
+                if accessible_cells:
+                    nearest_safe = min(
+                        accessible_cells,
+                        key=lambda c: abs(c[0] - tx) + abs(c[1] - ty),
+                    )
+                    tx, ty = nearest_safe[0], nearest_safe[1]
+            reason = data.get("reason", "Voice instruction")
+
+            best_drone: Optional[Any] = None
+            min_dist = 999
+            for drone in sim.drones.values():
+                if drone.is_waiting_response or drone.is_charging:
+                    continue
+                dist = abs(drone.x - tx) + abs(drone.y - ty)
+                if dist < min_dist:
+                    min_dist = dist
+                    best_drone = drone
+
+            if best_drone is not None:
+                best_drone.original_pos = [best_drone.x, best_drone.y]
+                best_drone.target_x, best_drone.target_y = tx, ty
+                best_drone.voice_override = True
+                best_drone.path_queue = []
+                sim.log(f"🧠 AI DISPATCH: Re-routing {best_drone.id} to ({tx},{ty}). Reason: {reason}", "AI", best_drone.id)
+                return {"status": "Command executed", "drone": best_drone.id, "target": [tx, ty]}
+            else:
+                return {"status": "No drones available for override"}
+
+    except Exception as e:
+        sim.log(f"Voice processing error: {e}", "ERROR")
+        return {"error": str(e)}
+
+    return {"status": "Command analyzed but no action taken"}
+
+
+# ─── MCP Tools (used by agent/agent.py via LangChain) ─────────────────────────
 
 @mcp.tool()
 def list_drones() -> str:
     """Returns a list of all active drone IDs on the network."""
-    drones = sim_engine.drones.keys()
+    drones = list(shared.sim.drones.keys())
     return f"Active Drones: {', '.join(drones)}"
+
 
 @mcp.tool()
 def get_status(drone_id: str) -> str:
-    """Gets the current status (battery, location) of a specific drone."""
-    drone = sim_engine.drones.get(drone_id)
+    """Gets the current status (battery, location, state) of a specific drone."""
+    drone = shared.sim.drones.get(drone_id)
     if not drone:
         return f"Error: Drone {drone_id} not found."
-    
-    return f"Status of {drone_id}: Battery={round(drone.battery, 2)}%, Location=({drone.x}, {drone.y}), State={drone.status.name}"
+    return (
+        f"Status of {drone_id}: Battery={drone.battery:.1f}%, "
+        f"Location=({drone.x},{drone.y}), Status={drone.status_label}, "
+        f"Charging={drone.is_charging}, Returning={drone.returning_to_base}, "
+        f"VictimStandby={drone.is_waiting_response}"
+    )
 
-@mcp.tool()
-def assign_scan_zone(drone_id: str, zone_id: str) -> str:
-    """
-    Commands a drone to sweep a pre-defined zone by its zone_id.
-    Use get_grid_state to see available zones first.
-    Args:
-        drone_id: The ID of the drone.
-        zone_id: The zone ID from the available zones list (e.g. 'Z0', 'Z5').
-    """
-    drone = sim_engine.drones.get(drone_id)
-    if not drone:
-        return f"Error: Drone {drone_id} not found."
-    if drone.status != DroneStatus.IDLE:
-        return f"Error: Drone {drone_id} is currently {drone.status.name}. Wait until IDLE."
-    
-    # Look up zone
-    zone = sim_engine.zones.get(zone_id)
-    if not zone:
-        return f"Error: Zone {zone_id} does not exist. Use get_grid_state to see valid zone IDs."
-    
-    # Try to claim the zone
-    from simulation import ZoneStatus
-    if zone["status"] != ZoneStatus.UNSCANNED:
-        return f"Error: Zone {zone_id} is already {zone['status'].name}. Pick a different zone."
-    
-    sx, sy, ex, ey = zone["sx"], zone["sy"], zone["ex"], zone["ey"]
-    
-    # --- Pre-Flight Battery Validation ---
-    from drone import chebyshev
-    transit_cost = chebyshev(drone.x, drone.y, sx, sy)
-    scan_cost = (abs(ex - sx) + 1) * (abs(ey - sy) + 1)
-    return_cost = chebyshev(ex, ey, 0, 0)
-    total_estimated_cost = transit_cost + scan_cost + return_cost
-    
-    if drone.battery < total_estimated_cost:
-        return f"Error: Drone {drone_id} has {round(drone.battery, 1)}% battery, but zone {zone_id} requires ~{round(total_estimated_cost, 1)}%. REJECTED. Pick a closer zone or return_to_base."
-    # --------------------------------------
-    
-    # Claim zone and dispatch drone
-    sim_engine.claim_zone(zone_id, drone_id)
-    result = sim_engine.assign_scan_zone(drone_id, sx, sy, ex, ey)
-    return f"SUCCESS: {result['message']} (Zone {zone_id} claimed)"
-
-@mcp.tool()
-def return_to_base(drone_id: str) -> str:
-    """Forces a drone to immediately abort its mission and return to base (0,0)."""
-    drone = sim_engine.drones.get(drone_id)
-    if not drone:
-        return f"Error: Drone {drone_id} not found."
-        
-    drone.return_to_base()
-    return f"Drone {drone_id} is aborting mission and returning to base."
 
 @mcp.tool()
 def get_grid_state() -> str:
-    """Returns a list of available (unscanned, unclaimed) zones that drones can be assigned to. Each zone has a zone_id, coordinates, and scan_cost."""
-    available = sim_engine.get_available_zones()
-    unscanned_count = sum(1 for row in sim_engine.grid for cell in row if cell["state"].name == "UNSCANNED")
-    survivors = len(sim_engine.survivors)
-    
+    """Returns available (unscanned, unclaimed) zones for drone assignment."""
+    sim = shared.sim
+    available = sim.get_available_zones()
+    unscanned_count = len(sim.get_unscanned_cells())
+    survivors_found = sim.total_victims_found
+    total_survivors = len(sim.zone.survivors)
+
     if not available:
-        return f"ALL ZONES COMPLETE. Grid {sim_engine.width}x{sim_engine.height}. Unscanned cells: {unscanned_count}. Survivors Found: {survivors}."
-    
+        return (f"ALL ZONES COMPLETE. Grid {10}x{10}. "
+                f"Unscanned cells: {unscanned_count}. "
+                f"Survivors Found: {survivors_found}/{total_survivors}.")
+
     zone_list = []
     for z in available:
-        zone_list.append(f"  {z['zone_id']}: ({z['sx']},{z['sy']})->({z['ex']},{z['ey']}) scan_cost={z['scan_cost']}")
-    
-    header = f"Grid {sim_engine.width}x{sim_engine.height}. Unscanned cells: {unscanned_count}. Survivors Found: {survivors}.\nAvailable Zones ({len(available)}):\n"
+        zone_list.append(
+            f"  {z['zone_id']}: ({z['sx']},{z['sy']})->({z['ex']},{z['ey']}) "
+            f"scan_cost={z['scan_cost']} priority={z['priority']}"
+        )
+    header = (f"Grid 10x10. Unscanned cells: {unscanned_count}. "
+              f"Survivors Found: {survivors_found}/{total_survivors}.\n"
+              f"Available Zones ({len(available)}):\n")
     return header + "\n".join(zone_list)
+
 
 @mcp.tool()
 def get_idle_drones() -> str:
     """
-    Returns a 'Mission Options Menu' for all idle drones. 
-    The agent must evaluate these options based on battery, priority, and risk, 
-    then execute the chosen assignments.
+    Returns a 'Mission Options Menu' for all idle drones.
+    The agent evaluates these options based on battery, priority, and risk,
+    then executes the chosen assignments using assign_scan_zone() or return_to_base().
     """
-    from drone import chebyshev
-    
-    idle_drones = []
-    for d_id, d in sim_engine.drones.items():
-        if d.status == DroneStatus.IDLE:
-            idle_drones.append((d_id, d))
-    
+    sim = shared.sim
+
+    # A drone is idle if it has no active assignment and is not in a special state
+    idle_drones = [
+        (d_id, d) for d_id, d in sim.drones.items()
+        if (d.target_x is None
+            and not d.path_queue
+            and not d.returning_to_base
+            and not d.is_charging
+            and not d.is_waiting_response)
+    ]
+
     if not idle_drones:
         return "NO_IDLE_DRONES: No drones currently need orders."
-    
-    available = sim_engine.get_available_zones()
-    survivors = len(sim_engine.survivors)
-    total_survivors = len(sim_engine.simulated_survivor_locations)
-    
+
+    available = sim.get_available_zones()
+    survivors_found = sim.total_victims_found
+    total_survivors = len(sim.zone.survivors)
+
     if not available:
         drone_names = ", ".join(d_id for d_id, _ in idle_drones)
-        return f"MISSION COMPLETE: Grid fully searched. Found {survivors}/{total_survivors} survivors. Drones available for recall: {drone_names}"
-    
-    report = [f"--- MISSION OPTIONS MENU (Found: {survivors}/{total_survivors}) ---"]
-    
+        return (f"MISSION COMPLETE: Grid fully searched. "
+                f"Found {survivors_found}/{total_survivors} survivors. "
+                f"Drones available for recall: {drone_names}")
+
+    base_x, base_y = sim.base_station
+    report = [f"--- MISSION OPTIONS MENU (Found: {survivors_found}/{total_survivors}) ---"]
+
     for d_id, drone in idle_drones:
-        report.append(f"\n[DRONE: {d_id}] Battery: {round(drone.battery, 1)}% @ ({drone.x}, {drone.y})")
-        
-        # Calculate options for this specific drone
+        report.append(f"\n[DRONE: {d_id}] Battery: {drone.battery:.1f}% @ ({drone.x},{drone.y})")
+
         options = []
         for z in available:
             transit = chebyshev(drone.x, drone.y, z["sx"], z["sy"])
-            return_cost = chebyshev(z["ex"], z["ey"], 0, 0)
+            return_cost = abs(z["ex"] - base_x) + abs(z["ey"] - base_y)
             total_needed = transit + z["scan_cost"] + return_cost
-            
-            # Use a slightly more sophisticated priority-dist weighting
-            score = (100 if z["priority"].name == "HIGH" else 50) - (transit * 1.5)
+            score = (100 if z["priority"] == "HIGH" else 50) - (transit * 1.5)
             options.append({
                 "zone_id": z["zone_id"],
                 "transit": transit,
                 "scan": z["scan_cost"],
                 "return": return_cost,
                 "total": total_needed,
-                "priority": z["priority"].name,
+                "priority": z["priority"],
                 "score": score
             })
-            
-        # Sort by score (priority + distance)
+
         options.sort(key=lambda x: x["score"], reverse=True)
-        
-        # Take top 3 valid options
         valid_options = [o for o in options if o["total"] <= drone.battery][:3]
-        
+
         if not valid_options:
             report.append("  * REC: return_to_base() | Battery too low for any zone.")
         else:
             for i, opt in enumerate(valid_options):
-                risk = "LOW" if drone.battery - opt["total"] > 20 else ("MEDIUM" if drone.battery - opt["total"] > 10 else "HIGH")
+                remaining = drone.battery - opt["total"]
+                risk = "LOW" if remaining > 20 else ("MEDIUM" if remaining > 10 else "HIGH")
                 report.append(
-                    f"  Opt {i+1}: assign_scan_zone(\"{d_id}\", \"{opt['zone_id']}\") - Priority={opt['priority']}, Cost={opt['total']}, Risk={risk}"
+                    f"  Opt {i+1}: assign_scan_zone(\"{d_id}\", \"{opt['zone_id']}\") "
+                    f"- Priority={opt['priority']}, Cost={opt['total']}, Risk={risk}"
                 )
-    
+
     return "\n".join(report)
 
-# -------------------------------------------------------------------
-# Main
-# -------------------------------------------------------------------
+
+@mcp.tool()
+def assign_scan_zone(drone_id: str, zone_id: str) -> str:
+    """
+    Commands a drone to sweep a pre-defined zone by its zone_id.
+    Use get_idle_drones() to see available options first.
+    Args:
+        drone_id: The ID of the drone (e.g. 'ALPHA-1').
+        zone_id: The zone ID to assign (e.g. 'Z0', 'Z1', 'Z2', 'Z3').
+    """
+    sim = shared.sim
+    drone = sim.drones.get(drone_id)
+    if not drone:
+        return f"Error: Drone {drone_id} not found."
+
+    if drone.is_waiting_response:
+        return f"Error: {drone_id} is on VICTIM STANDBY. Cannot reassign."
+    if drone.is_charging and drone.battery < 90:
+        return f"Error: {drone_id} is charging ({drone.battery:.0f}%). Wait until charged."
+
+    zone = sim.zone.zones.get(zone_id)
+    if not zone:
+        return f"Error: Zone {zone_id} does not exist. Use get_grid_state() to see valid IDs."
+    if zone.status != ZoneStatus.UNSCANNED:
+        return f"Error: Zone {zone_id} is already {zone.status.value}. Pick a different zone."
+
+    # Pre-flight battery validation
+    base_x, base_y = sim.base_station
+    transit_cost = chebyshev(drone.x, drone.y, zone.sx, zone.sy)
+    scan_cost = (zone.ex - zone.sx + 1) * (zone.ey - zone.sy + 1)
+    return_cost = abs(zone.ex - base_x) + abs(zone.ey - base_y)
+    total_estimated = transit_cost + scan_cost + return_cost
+
+    if drone.battery < total_estimated:
+        return (f"Error: {drone_id} has {drone.battery:.1f}% battery but zone {zone_id} "
+                f"requires ~{total_estimated:.0f}%. REJECTED. "
+                f"Pick a closer zone or call return_to_base(\"{drone_id}\").")
+
+    # Claim zone and generate path queue
+    if not sim.claim_zone(zone_id, drone_id):
+        return f"Error: Zone {zone_id} was just claimed by another drone. Pick a different zone."
+
+    result = sim.assign_zone(drone_id, zone_id)
+    if "error" in result:
+        sim.release_zone(zone_id)
+        return f"Error: {result['error']}"
+
+    sim.log(f"📡 AGENT DISPATCH: {drone_id} assigned to zone {zone_id}.", "AI", drone_id)
+    return f"SUCCESS: {result['message']} (Zone {zone_id} claimed)"
+
+
+@mcp.tool()
+def return_to_base(drone_id: str) -> str:
+    """Forces a drone to abort its current mission and return to base."""
+    sim = shared.sim
+    drone = sim.drones.get(drone_id)
+    if not drone:
+        return f"Error: Drone {drone_id} not found."
+
+    base_x, base_y = sim.base_station
+    if drone.assigned_zone_id:
+        sim.release_zone(drone.assigned_zone_id)
+        drone.assigned_zone_id = None
+
+    drone.path_queue = []
+    drone.target_x, drone.target_y = base_x, base_y
+    drone.returning_to_base = True
+    drone.status = "RETURNING"
+    drone.status_label = "RTB"
+    sim.log(f"🔁 AGENT: {drone_id} recalled to base.", "INFO", drone_id)
+    return f"Drone {drone_id} is returning to base ({base_x},{base_y})."
+
+
+# ─── Entrypoint ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    import threading
-    import sys
-    import time
-    
-    # CRITICAL: MCP uses stdout for its protocol. 
-    # Any print() in the main thread or sub-threads NOT directed to stderr 
-    # will break the Agent connection.
+    import copy
 
     def run_api_server():
-        # Set Windows-specific event loop policy for the background thread
         if sys.platform == 'win32':
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-            
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
-        # Give a moment for any previous sockets to clear
-        time.sleep(1.0)
-            
-        print("Starting FastAPI / WebSocket server on http://127.0.0.1:8000", file=sys.stderr, flush=True)
+
+        print("Starting FastAPI server on http://127.0.0.1:8000", file=sys.stderr, flush=True)
         try:
-            import copy
-            # host="127.0.0.1" is often safer than "0.0.0.0" on local Windows machines
-            # Use log_config to redirect all logging to stderr
             log_config = copy.deepcopy(uvicorn.config.LOGGING_CONFIG)
             log_config["handlers"]["default"]["stream"] = "ext://sys.stderr"
             log_config["handlers"]["access"]["stream"] = "ext://sys.stderr"
-            
             uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info", log_config=log_config)
         except OSError as e:
             if e.errno == 10048:
-                print("\n[ERROR] Port 8000 is already in use by another process. Please close other instances of the server.", file=sys.stderr, flush=True)
+                print("\n[ERROR] Port 8000 already in use.", file=sys.stderr, flush=True)
             else:
-                print(f"[ERROR] Failed to start FastAPI server: {e}", file=sys.stderr, flush=True)
+                print(f"[ERROR] {e}", file=sys.stderr, flush=True)
         except Exception as e:
-            print(f"[ERROR] Unexpected error in API thread: {e}", file=sys.stderr, flush=True)
-        
+            print(f"[ERROR] {e}", file=sys.stderr, flush=True)
+
     api_thread = threading.Thread(target=run_api_server, daemon=True)
     api_thread.start()
 

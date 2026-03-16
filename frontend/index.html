@@ -1,81 +1,13 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Drone Swarm Live Observer</title>
-    <link rel="stylesheet" href="style.css">
-    <!-- Google Fonts for a sleek modern look -->
-    <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@300;400;500;600;700&family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap" rel="stylesheet">
-</head>
-<body>
-
-    <header class="top-nav">
-        <div class="brand">
-            <span class="logo-icon">🚁</span>
-            <h1>SwarmCommand <span>AI Dashboard</span></h1>
-        </div>
-        
-        <div class="controls-panel">
-            <div class="input-group">
-                <label for="survivor-count">Survivors:</label>
-                <input type="number" id="survivor-count" value="3" min="1" max="20">
-            </div>
-            
-            <button id="start-btn" class="btn primary-btn">START MISSION</button>
-            <button id="stop-btn" class="btn danger-btn" disabled>STOP</button>
-        </div>
-
-        <div class="stats-panel">
-            <div class="stat-box">
-                <span class="label">Time Elapsed</span>
-                <span class="value" id="timer-display">00:00</span>
-            </div>
-            <div class="stat-box">
-                <span class="label">Survivors Rescued</span>
-                <span class="value highlight" id="survivor-stats">0 / 0</span>
-            </div>
-        </div>
-    </header>
-
-    <main class="dashboard-layout">
-        <!-- Left Side Panel: Drone Status -->
-        <aside class="side-panel left-panel">
-            <div class="panel-section fleet-status">
-                <h2>Fleet Telemetry</h2>
-                <div id="drones-container" class="drones-list">
-                    <!-- JS fills this -->
-                    <div class="placeholder">Waiting...</div>
-                </div>
-            </div>
-        </aside>
-
-        <!-- Center Grid Map -->
-        <section class="map-container">
-            <div class="grid-wrapper">
-                <div id="simulation-grid" class="simulation-grid">
-                    <!-- JS will inject 30x20 grid cells -->
-                </div>
-            </div>
-            <div class="legend">
-                <span class="legend-item"><div class="box gray"></div> Unscanned</span>
-                <span class="legend-item"><div class="box yellow"></div> Clear</span>
-                <span class="legend-item"><div class="box red"></div> Survivor!</span>
-                <span class="legend-item"><div class="box blue"></div> Drone</span>
-            </div>
-        </section>
-
-        <!-- Right Side Panel: Agent Logs -->
-        <aside class="side-panel right-panel">
-            <div class="panel-section agent-thoughts">
-                <h2>Agent Chain-of-Thought</h2>
-                <div id="log-container" class="log-stream">
-                    <p class="sys-msg">Waiting for mission start...</p>
-                </div>
-            </div>
-        </aside>
-    </main>
-
-    <script src="script.js"></script>
-</body>
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SENTINEL COMMAND</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
 </html>
