@@ -11,8 +11,8 @@ from pydantic import BaseModel
 # ─── Grid Constants ────────────────────────────────────────────────────────────
 GRID_W               = 10
 GRID_H               = 10
-CHARGE_RATE          = 25.0   # % per charge_step call
-BATTERY_DRAIN_MOVE   = 2.0    # % per cell moved
+CHARGE_RATE          = 100.0 / (60.0 / 0.7)   # % per charge_step call (60s total)
+BATTERY_DRAIN_MOVE   = 2.0    # % per cell moved (increased for fast demo drain)
 BATTERY_DRAIN_SCAN   = 1.0    # % per thermal scan
 LOW_BATTERY_THRESHOLD = 25.0  # % — recall threshold
 NUM_DRONES           = 5
@@ -22,7 +22,8 @@ class Drone(BaseModel):
     id: str
     x: int = 0
     y: int = 0
-    battery: float = 100.0
+    battery: Optional[float] = None  # None = UNKNOWN
+    is_active: bool = False  # Starts offline until first heartbeat
     is_charging: bool = False
     is_waiting_response: bool = False
     returning_to_base: bool = False
@@ -33,7 +34,7 @@ class Drone(BaseModel):
     last_thermal_matrix: Optional[List[List[int]]] = None
     last_thermal_scan: Optional[Dict[str, Any]] = None
     charge_cycles: int = 0
-    status_label: str = "STANDBY"
+    status_label: str = "UNKNOWN"
     path_history: List[List[int]] = []  # recent positions for trail
     is_guiding: bool = False
     guiding_victim_id: Optional[str] = None
@@ -118,6 +119,82 @@ class SimulationState:
         self.total_rescued = 0
         self._log_id = 0
 
+    # ─── Heartbeat Simulation ────────────────────────────────────────────────
+    
+    def simulate_heartbeats(self) -> List[str]:
+        """Runs every tick to randomly connect/disconnect drones from the mesh network."""
+        if not self.mission_active:
+            return list(self.drones.keys())
+            
+        active_drones = []
+        for d_id, drone in self.drones.items():
+            was_active = drone.is_active
+            
+            # Simulate a continuous connection state machine
+            is_active_now = False
+            
+            if was_active:
+                # Prototype rule: Drones do not randomly drop connection once established
+                is_active_now = True
+            else:
+                # If they have never connected before, give them a high 60% chance to join immediately
+                if drone.battery is None:
+                    is_active_now = random.random() < 0.20
+                else:
+                    # 20% chance per tick to regain a dropped connection later in the mission
+                    is_active_now = random.random() < 0.20
+                
+            # If this is the drone's first time connecting, randomize its battery
+            if is_active_now and drone.battery is None:
+                drone.battery = random.uniform(0.0, 100.0)
+                self.log(f"🔋 [INIT] {d_id} established first link. Battery pinged: {drone.battery:.0f}%", "INFO", d_id)
+                
+            # Has power check (must be assigned by now if active)
+            has_power = drone.battery is not None and drone.battery >= 10.0
+            
+            if not has_power:
+                is_active_now = False
+            
+            drone.is_active = is_active_now
+            
+            if is_active_now:
+                active_drones.append(d_id)
+                
+            if not is_active_now:
+                if was_active:
+                    self.log(f"⚠️ [CONNECTION LOST] {d_id} dropped from mesh network" + (" (LOW BATTERY)" if not has_power else ""), "WARN", d_id)
+                if not has_power:
+                    drone.status_label = "OFFLINE (Low Battery)"
+                else:
+                    drone.status_label = "OFFLINE (No Signal)"
+            elif not was_active and is_active_now:
+                # Just came back online
+                self.log(f"✅ [DETECTED / RECONNECTED] {d_id} joined the swarm mesh network.", "SUCCESS", d_id)
+                if drone.battery is not None and drone.battery < LOW_BATTERY_THRESHOLD:
+                    drone.status_label = "NEEDS CHARGE" # Battery low, needs to RTB
+                elif drone.is_charging:
+                    drone.status_label = "CHARGING"
+                else:
+                    drone.status_label = "STANDBY"
+                    
+            # Reset target if disconnected so they don't ghost move
+            if not drone.is_active:
+                drone.target_x = None
+                drone.target_y = None
+                
+        # Calculate exactly who is dropped
+        all_drone_ids = list(self.drones.keys())
+        dropped = set(all_drone_ids) - set(active_drones)
+        
+        # Explicit print for the user's terminal
+        print(f"[{self._ts()}] 📡 --- HEARTBEAT CHECK ---")
+        if active_drones:
+            print(f"[{self._ts()}] 🟢 Drones AVAILABLE: {', '.join(active_drones)}")
+        if dropped:
+            print(f"[{self._ts()}] 🔴 Drones UNAVAILABLE: {', '.join(dropped)}")
+            
+        return active_drones
+
     # ─── Utilities ───────────────────────────────────────────────────────────
 
     def _ts(self) -> str:
@@ -180,6 +257,9 @@ class SimulationState:
         drone = self.drones[drone_id]
         if drone.is_waiting_response:
             return f"{drone_id} is on VICTIM STANDBY — awaiting operator confirmation."
+        if not drone.is_active:
+            return f"{drone_id} is OFFLINE (No heartbeat). Cannot execute move command."
+            
         x = max(0, min(GRID_W - 1, x))
         y = max(0, min(GRID_H - 1, y))
 
@@ -241,13 +321,15 @@ class SimulationState:
         if drone_id not in self.drones:
             return "ERROR: Drone not found"
         drone = self.drones[drone_id]
+        if not drone.is_active:
+            return f"ERROR: {drone_id} is OFFLINE."
         if (drone.x, drone.y) != self.base_station:
             return (f"ERROR: {drone_id} must be at base (0,0). "
                     f"Currently at ({drone.x},{drone.y}). Move to (0,0) first.")
         drone.is_charging = True
         drone.returning_to_base = False
         drone.battery = min(100.0, drone.battery + CHARGE_RATE)
-        drone.status_label = "CHARGING"
+        drone.status_label = f"CHARGING ({drone.battery:.0f}%)"
         if drone.battery >= 100.0:
             drone.is_charging = False
             drone.charge_cycles += 1
@@ -256,7 +338,7 @@ class SimulationState:
             self.log(msg, "CHARGE", drone_id)
         else:
             msg = f"[CHARGING] {drone_id}: {drone.battery:.0f}%"
-            self.log(msg, "CHARGE", drone_id)
+            # self.log(msg, "CHARGE", drone_id) # Prevent terminal spam every 0.7s during 60s charge
         return msg
 
     def scan(self, drone_id: str) -> str:
@@ -264,6 +346,8 @@ class SimulationState:
         if drone_id not in self.drones:
             return "ERROR: Drone not found"
         drone = self.drones[drone_id]
+        if not drone.is_active:
+            return f"WARNING: {drone_id} is OFFLINE. Cannot scan."
         if drone.battery < BATTERY_DRAIN_SCAN:
             return f"WARNING: {drone_id} critically low battery. Cannot scan."
 
@@ -365,10 +449,10 @@ class SimulationState:
     def get_estimated_finish_time(self) -> str:
         """Simple ETA based on remaining cells and active drones."""
         unscanned = len(self.get_unscanned_cells())
-        active_drones = len([d for d in self.drones.values() if d.status_label != "STANDBY"])
-        if active_drones == 0: return "NA"
+        active_cnt = len([d for d in self.drones.values() if d.status_label not in ["STANDBY", "OFFLINE (No Signal)"] and d.is_active])
+        if active_cnt == 0: return "NA"
         # 0.7s per sim step, approx 1.5 steps per cell including scanning/turns
-        seconds = (unscanned / active_drones) * 1.5 * 0.7
+        seconds = (unscanned / active_cnt) * 1.5 * 0.7
         m, s = divmod(int(seconds), 60)
         return f"{m:02}m {s:02}s"
 

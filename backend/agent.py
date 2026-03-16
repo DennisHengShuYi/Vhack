@@ -81,9 +81,10 @@ def _build_planning_prompt(state: Dict[str, Any]) -> str:
         if d["is_waiting_response"]:
             flags.append("⚠️VICTIM_STANDBY")
         flag_str = " | ".join(flags) if flags else "ACTIVE"
+        bat_str = f"{d['battery']:.0f}%" if d['battery'] is not None else "UNKNOWN"
         drones_info.append(
             f"  {d['id']:8s} → pos=({d['x']},{d['y']}) "
-            f"bat={d['battery']:.0f}% "
+            f"bat={bat_str} "
             f"status={d['status_label']:20s} [{flag_str}]"
         )
 
@@ -238,14 +239,16 @@ class CommandAgent:
         used_targets: set = set()
 
         for drone in sim.drones.values():
-            # Skip busy drones
+            # Skip busy or offline drones
+            if not getattr(drone, 'is_active', True):
+                continue
             if drone.is_waiting_response:
                 continue
-            if drone.is_charging and drone.battery < 90:
+            if drone.battery is not None and drone.is_charging and drone.battery < 90:
                 continue
 
             # Battery critical — recall
-            if drone.battery < LOW_BATTERY_THRESHOLD:
+            if drone.battery is not None and drone.battery < LOW_BATTERY_THRESHOLD:
                 assignments[drone.id] = [0, 0]
                 continue
 

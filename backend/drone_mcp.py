@@ -7,6 +7,7 @@ Hard-coding drone movements is prohibited — the LLM must call these tools.
 from fastmcp import FastMCP
 import shared
 from typing import List, Dict, Any
+import random
 
 mcp = FastMCP(
     name="RescueSwarmMCP",
@@ -24,10 +25,11 @@ def list_drones() -> List[str]:
     """
     🔍 Real-time swarm discovery — returns active drone IDs from the mesh network.
 
+    Simulates a heartbeat system: some drones may randomly fail to respond (only 3-5 active).
     The Command Agent MUST call this first. Drone IDs are never hard-coded.
     Returns a list of all online drone IDs (e.g. ['ALPHA-1', 'ALPHA-2', ...]).
     """
-    return list(shared.sim.drones.keys())
+    return shared.sim.simulate_heartbeats()
 
 
 # ─── Tool 2: Full Telemetry ─────────────────────────────────────────────────────
@@ -48,7 +50,7 @@ def get_drone_status(drone_id: str) -> Dict[str, Any]:
         "id": d.id,
         "x": d.x,
         "y": d.y,
-        "battery": round(d.battery, 1),
+        "battery": round(d.battery, 1) if d.battery is not None else None,
         "is_charging": d.is_charging,
         "returning_to_base": d.returning_to_base,
         "is_waiting_response": d.is_waiting_response,

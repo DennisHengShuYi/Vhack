@@ -16,7 +16,8 @@ import {
   Volume2,
   Send,
   Zap,
-  Power
+  Power,
+  Radio
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -36,27 +37,53 @@ export default function App() {
   const [operatorMsg, setOperatorMsg] = useState("");
   const [isDeploying, setIsDeploying] = useState(false);
   const [activeDroneId, setActiveDroneId] = useState<string | null>(null);
+  // New toast notification state
+  const [toastMessage, setToastMessage] = useState<{ text: string, type: 'success' | 'warn' } | null>(null);
+  const [lastLogId, setLastLogId] = useState<number>(0);
+
 
   const logEndRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<any>(null);
 
   // Poll state every 800ms
-  useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const resp = await fetch(`${API_BASE}/state`);
-        const data = await resp.json();
-        setState(data);
-        setIsLoading(false);
-      } catch (err) {
-        console.error("Fetch failed:", err);
-      }
-    };
+  const fetchState = async () => {
+    try {
+      const resp = await fetch(`${API_BASE}/state`);
+      const data = await resp.json();
+      setState(data);
+      setIsLoading(false);
+    } catch (err) {
+      console.error("Fetch failed:", err);
+    }
+  };
 
-    fetchData();
-    const interval = setInterval(fetchData, 800);
+  useEffect(() => {
+    let interval: any;
+    if (state?.stats?.mission_active) {
+      interval = setInterval(fetchState, 700);
+    } else {
+      setTimeout(fetchState, 1000); // Poll less frequently when inactive
+    }
     return () => clearInterval(interval);
-  }, []);
+  }, [state?.stats?.mission_active]);
+
+  // Watch for connection/disconnection logs to show toast notifications
+  useEffect(() => {
+    if (state?.log && state.log.length > 0) {
+      const newLogs = state.log.filter((l: any) => l.id > lastLogId);
+      if (newLogs.length > 0) {
+        setLastLogId(state.log[state.log.length - 1].id);
+        
+        // Find latest join/lost connection log
+        const alertLog = newLogs.find((l: any) => l.text.includes("[JOINED]") || l.text.includes("[CONNECTION LOST]"));
+        if (alertLog) {
+          const type = alertLog.text.includes("[JOINED]") ? 'success' : 'warn';
+          setToastMessage({ text: alertLog.text, type });
+          setTimeout(() => setToastMessage(null), 5000); // Hide after 5 seconds
+        }
+      }
+    }
+  }, [state?.log]);
 
   // Auto-scroll removed as per user request to prevent "pulling down"
   /*
@@ -166,11 +193,28 @@ export default function App() {
   if (isLoading) return <div className="loading-container"><Zap className="animate-pulse" /> INITIALIZING SENTINEL...</div>;
 
   const { stats, drones, zone, log } = state || {};
-  const activeDronesCount = drones?.filter((d: any) => d.status_label !== "STANDBY")?.length || 0;
+  const activeDronesCount = drones?.filter((d: any) => d.status_label !== "STANDBY" && !d.status_label.includes("OFFLINE"))?.length || 0;
   const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
 
   return (
     <div className="app-container">
+      <AnimatePresence>
+        {toastMessage && (
+          <motion.div 
+            initial={{ opacity: 0, y: -50, x: '-50%' }} 
+            animate={{ opacity: 1, y: 0, x: '-50%' }} 
+            exit={{ opacity: 0, y: -20, x: '-50%' }}
+            className={`fixed top-4 left-1/2 z-50 px-6 py-3 rounded-md shadow-lg border font-mono text-sm shadow-[0_0_15px_rgba(0,0,0,0.5)] ${
+              toastMessage.type === 'success' 
+                ? 'bg-[rgba(30,100,50,0.9)] border-[var(--accent-success)] text-white' 
+                : 'bg-[rgba(100,20,20,0.9)] border-[var(--accent-red)] text-white'
+            }`}
+          >
+            {toastMessage.type === 'success' ? <Radio className="inline mr-2" size={16}/> : <AlertTriangle className="inline mr-2" size={16}/>}
+            {toastMessage.text}
+          </motion.div>
+        )}
+      </AnimatePresence>
       {/* --- HUD HEADER --- */}
       <header className="hud-header glass">
         <div className="brand">
@@ -220,18 +264,28 @@ export default function App() {
           <div className="tab-content glass scroll-area">
             {activeTab === 'telemetry' ? (
               <div className="drone-list">
-                {drones.map((drone: any) => (
+                {drones.map((drone: any) => {
+                  const isOfflineData = drone.status_label.includes("OFFLINE");
+                  const isLowBattery = drone.status_label.includes("Low Battery");
+                  
+                  // Ensure accurate name presentation
+                  const droneName = `DRONE ${drone.id.split('-')[1]}`;
+                  
+                  return (
                   <motion.div
                     key={drone.id}
-                    className={`drone-card ${activeDroneId === drone.id ? 'active' : ''} ${drone.is_waiting_response ? 'alert' : ''}`}
+                    className={`drone-card ${activeDroneId === drone.id ? 'active' : ''} ${drone.is_waiting_response ? 'alert' : ''} ${isOfflineData ? 'offline opacity-50' : ''} ${isLowBattery ? 'low-batt-offline' : ''}`}
                     whileHover={{ scale: 1.02 }}
                     onClick={() => setActiveDroneId(drone.id)}
                   >
                     <div className="drone-card-header">
-                      <span className="drone-id font-mono">{drone.id}</span>
+                      <span className="drone-id font-mono">{droneName}</span>
                       <div className="flex-row gap-2 items-center">
-                        <span className="text-xs opacity-60">{drone.battery.toFixed(0)}%</span>
-                        <div className={`status-dot ${drone.status_label.toLowerCase().replace(/ /g, '-')}`}></div>
+                        <span className="text-xs opacity-60 flex items-center gap-1">
+                          {isLowBattery && <AlertTriangle size={10} className="text-red-500" />} 
+                          {drone.battery !== null ? `${Math.max(0, drone.battery).toFixed(0)}%` : 'UNKNOWN'}
+                        </span>
+                        <div className={`status-dot ${isOfflineData ? 'offline' : drone.status_label.toLowerCase().replace(/ /g, '-')}`}></div>
                       </div>
                     </div>
                     <div className="drone-card-body">
@@ -239,19 +293,28 @@ export default function App() {
                         <div className="tel-row">
                           <Battery size={14} />
                           <div className="battery-bar-container">
-                            <div className={`battery-fill ${drone.battery < 30 ? 'critical' : ''}`} style={{ width: `${drone.battery}%` }}></div>
+                            <div 
+                               className={`battery-fill ${drone.battery !== null && drone.battery < 30 ? 'critical' : ''}`} 
+                               style={{ 
+                                 width: drone.battery !== null ? `${drone.battery}%` : '0%', 
+                                 filter: isOfflineData ? 'grayscale(100%)' : 'none', 
+                                 backgroundColor: isLowBattery ? 'var(--accent-red)' : (drone.battery === null ? '#555' : '') 
+                               }}
+                            ></div>
                           </div>
-                          <span className="font-mono text-xs">{drone.battery.toFixed(0)}%</span>
+                          <span className="font-mono text-xs">{drone.battery !== null ? `${drone.battery.toFixed(0)}%` : '???'}</span>
                         </div>
                         <div className="tel-row">
                           <Navigation size={14} />
-                          <span className="font-mono text-xs">POS: ({drone.x}, {drone.y}) | {drone.terrain?.toUpperCase()}</span>
+                          <span className="font-mono text-xs">POS: ({drone.x}, {drone.y}) {isOfflineData ? '' : `| ${drone.terrain?.toUpperCase() || ''}`}</span>
                         </div>
-                        <div className="tel-status font-mono">{drone.status_label}</div>
+                        <div className="tel-status font-mono">
+                          {isLowBattery ? "UNAVAILABLE (NO BATT)" : drone.status_label}
+                        </div>
                       </div>
                     </div>
                   </motion.div>
-                ))}
+                )})}
               </div>
             ) : (
               <div className="mission-log font-mono">
@@ -301,16 +364,27 @@ export default function App() {
                     )}
                   </AnimatePresence>
 
-                  {droneAtPos && (
-                    <motion.div
-                      layoutId={`drone-${droneAtPos.id}`}
-                      className={`drone-marker ${droneAtPos.is_waiting_response ? 'special' : ''}`}
-                      title={droneAtPos.id}
-                    >
-                      <Cpu size={14} />
-                      <span className="d-label font-mono">{droneAtPos.id.split('-')[1]}</span>
-                    </motion.div>
-                  )}
+                  {/* Drone Marker */}
+                  {(() => {
+                    const isOfflineOnMap = droneAtPos && droneAtPos.status_label.includes("OFFLINE");
+                    const isLowBatteryOnMap = droneAtPos && droneAtPos.status_label.includes("Low Battery");
+                    if (droneAtPos && (!isOfflineOnMap || isLowBatteryOnMap)) {
+                      return (
+                        <motion.div
+                          layoutId={`drone-${droneAtPos.id}`}
+                          className={`drone-marker ${droneAtPos.is_waiting_response ? 'special' : ''} ${isOfflineOnMap ? 'opacity-40 grayscale' : ''}`}
+                          title={droneAtPos.id}
+                        >
+                          <Cpu size={14} className={isLowBatteryOnMap ? "text-red-500" : ""} />
+                          <span className="d-label font-mono">
+                            {droneAtPos.id.split('-')[1]}
+                          </span>
+                          {isLowBatteryOnMap && <div className="absolute -top-4 w-12 text-[8px] text-red-500 font-bold whitespace-nowrap">NO BATT</div>}
+                        </motion.div>
+                      );
+                    }
+                    return null;
+                  })()}
                   {x === 0 && y === 0 && <Power size={14} className="base-icon" />}
                 </div>
               );
@@ -526,6 +600,11 @@ export default function App() {
         .status-dot.navigating, .status-dot.resuming { background: var(--accent-cyan); }
         .status-dot.scanning { background: var(--accent-amber); animation: pulse 1s infinite; }
         .status-dot.victim_detected, .status-dot.alert { background: var(--accent-red); }
+        .status-dot.offline { background: #333; box-shadow: inset 0 0 2px #000; }
+        .drone-card.offline { border-color: #333; background: rgba(0,0,0,0.5); }
+        .drone-card.low-batt-offline { border-color: rgba(255, 61, 61, 0.4); background: rgba(255, 61, 61, 0.05); }
+        .drone-card.low-batt-offline .status-dot.offline { background: var(--accent-red); box-shadow: inset 0 0 5px rgba(0,0,0,0.8); animation: pulse 2s infinite; }
+        .opacity-50 { opacity: 0.5; filter: grayscale(80%); }
 
         .battery-bar-container { flex: 1; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; }
         .battery-fill { height: 100%; background: var(--accent-success); border-radius: 2px; }

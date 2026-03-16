@@ -103,7 +103,14 @@ class MissionManager:
                     sim.log(f"Planning error: {err_trunc}", "ERROR")
 
             # ── Loop A: Simulation Tick ───────────────────────────────────
+            # Always run the network heartbeat first
+            sim.simulate_heartbeats()
+
             for d_id, drone in list(sim.drones.items()):
+
+                # --- Freeze offline/disconnected drones so they don't move ---
+                if not getattr(drone, 'is_active', True):
+                    continue
 
                 # --- Victim standby: do not move ---
                 if drone.is_waiting_response:
@@ -111,7 +118,7 @@ class MissionManager:
                     continue
 
                 # --- Auto-charge at base ---
-                if (drone.x, drone.y) == (0, 0) and drone.battery < 100 and (
+                if (drone.x, drone.y) == (0, 0) and drone.battery is not None and drone.battery < 100 and (
                     drone.returning_to_base or drone.is_charging or drone.battery < LOW_BATTERY_THRESHOLD
                 ):
                     if not drone.is_charging:
@@ -176,25 +183,27 @@ class MissionManager:
                                 sim.total_rescued += 1
                                 sim.log(f"Survivor {s['id']} guided safely to base station!", "SUCCESS", d_id)
 
-                drone.battery = max(0.0, drone.battery - BATTERY_DRAIN_MOVE)
-                drone.status_label = f"→({tx},{ty})"
+                # --- Post-Move Updates (Battery & History) ---
+                if drone.battery is not None:
+                    drone.battery = max(0.0, drone.battery - BATTERY_DRAIN_MOVE)
+                    drone.status_label = f"→({tx},{ty})"
 
-                # Track path history
-                drone.path_history.append([nx, ny])
-                while len(drone.path_history) > 12:
-                    drone.path_history.pop(0)
+                    # Track path history
+                    drone.path_history.append([nx, ny])
+                    while len(drone.path_history) > 12:
+                        drone.path_history.pop(0)
 
-                # Low battery threshold — force RTB
-                if drone.battery < LOW_BATTERY_THRESHOLD and not drone.returning_to_base:
-                    drone.target_x, drone.target_y = 0, 0
-                    drone.returning_to_base = True
-                    sim.log(
-                        f"🪫 [SYSTEM LOGIC] {d_id} battery {drone.battery:.0f}% below threshold. Initiating safety RTB protocol.", "WARN", d_id
-                    )
+                    # Low battery threshold — force RTB
+                    if drone.battery < LOW_BATTERY_THRESHOLD and not drone.returning_to_base:
+                        drone.target_x, drone.target_y = 0, 0
+                        drone.returning_to_base = True
+                        sim.log(
+                            f"🪫 [SYSTEM LOGIC] {d_id} battery {drone.battery:.0f}% below threshold. Initiating safety RTB protocol.", "WARN", d_id
+                        )
 
-                # Opportunistic scan while passing through
-                if not sim.zone.scanned_cells[ny][nx]:
-                    sim.scan(d_id)
+                    # Opportunistic scan while passing through
+                    if not sim.zone.scanned_cells[ny][nx]:
+                        sim.scan(d_id)
 
             await asyncio.sleep(SIM_TICK)
             step_count += 1
