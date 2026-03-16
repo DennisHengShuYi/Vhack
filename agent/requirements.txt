@@ -1,0 +1,6 @@
+langchain
+langchain-openai
+langchain-mcp-adapters
+mcp
+langgraph
+aiohttp

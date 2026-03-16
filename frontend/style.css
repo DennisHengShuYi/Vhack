@@ -1,0 +1,471 @@
+:root {
+    --bg-dark: #0f172a;
+    --bg-panel: #1e293b;
+    --bg-accent: #334155;
+    --text-main: #f8fafc;
+    --text-muted: #94a3b8;
+    --primary: #3b82f6;
+    --primary-hover: #2563eb;
+    --danger: #ef4444;
+    --danger-hover: #dc2626;
+    --success: #10b981;
+    --warning: #f59e0b;
+    --border: #475569;
+    --cell-unscanned: #cbd5e1;
+    --cell-clear: #fbbf24;
+    --cell-survivor: #ef4444;
+    --cell-border: white;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: 'Inter', sans-serif;
+    background-color: var(--bg-dark);
+    color: var(--text-main);
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+}
+
+h1, h2, h3 {
+    font-family: 'Chakra Petch', sans-serif;
+}
+
+/* =========================================
+   HEADER / TOP NAV
+   ========================================= */
+.top-nav {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 2rem;
+    background-color: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+}
+
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.brand .logo-icon {
+    font-size: 1.5rem;
+}
+
+.brand h1 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    letter-spacing: 1px;
+    margin: 0;
+}
+
+.brand span {
+    color: var(--primary);
+}
+
+.controls-panel {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+}
+
+.input-group {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.input-group label {
+    font-size: 0.875rem;
+    color: var(--text-muted);
+}
+
+.input-group input {
+    width: 60px;
+    background-color: var(--bg-dark);
+    border: 1px solid var(--border);
+    color: white;
+    padding: 0.5rem;
+    border-radius: 4px;
+    text-align: center;
+}
+
+.btn {
+    padding: 0.5rem 1.5rem;
+    font-family: 'Chakra Petch', sans-serif;
+    font-weight: 600;
+    font-size: 0.9rem;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.primary-btn {
+    background-color: var(--primary);
+    color: white;
+}
+
+.primary-btn:hover:not(:disabled) {
+    background-color: var(--primary-hover);
+}
+
+.danger-btn {
+    background-color: var(--danger);
+    color: white;
+}
+
+.danger-btn:hover:not(:disabled) {
+    background-color: var(--danger-hover);
+}
+
+.stats-panel {
+    display: flex;
+    gap: 2rem;
+}
+
+.stat-box {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+}
+
+.stat-box .label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.stat-box .value {
+    font-family: 'Chakra Petch', sans-serif;
+    font-size: 1.5rem;
+    font-weight: 700;
+}
+
+.stat-box .highlight {
+    color: var(--success);
+}
+
+/* =========================================
+   MAIN LAYOUT
+   ========================================= */
+.dashboard-layout {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+    width: 100%;
+}
+
+.side-panel {
+    width: 320px;
+    background-color: var(--bg-panel);
+    display: flex;
+    flex-direction: column;
+}
+
+.left-panel {
+    border-right: 1px solid var(--border);
+}
+
+.right-panel {
+    border-left: 1px solid var(--border);
+    width: 400px;
+}
+
+.map-container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    padding: 2rem;
+    position: relative;
+}
+
+.grid-wrapper {
+    position: relative; /* important for absolute positioning of drones */
+    padding: 10px;
+    background-color: var(--bg-panel);
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+}
+
+.simulation-grid {
+    display: grid;
+    grid-template-columns: repeat(20, 40px);
+    grid-template-rows: repeat(15, 40px);
+    gap: 1px;
+    background-color: var(--cell-border);
+}
+
+/* Base cell styling */
+.cell {
+    width: 40px;
+    height: 40px;
+    background-color: var(--cell-unscanned);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    font-size: 20px;
+    transition: background-color 0.3s ease;
+}
+
+/* Cell States */
+.cell.CLEAR {
+    background-color: var(--cell-clear);
+}
+
+.cell.SURVIVOR_DETECTED {
+    background-color: var(--cell-survivor);
+    animation: pulse 1s infinite alternate;
+}
+
+.cell.HIDDEN_SURVIVOR {
+    background-color: rgba(239, 68, 68, 0.2);
+    border: 1px dashed rgba(239, 68, 68, 0.5);
+}
+
+/* Drone Icon styling (absolute positioned over the grid) */
+.drone-icon {
+    position: absolute;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    font-size: 24px;
+    /* Smooth CSS transition for movement */
+    transition: transform 0.3s ease-in-out;
+    z-index: 10;
+    pointer-events: none;
+    /* Top and Left are set by Javascript using inline styles */
+    top: 10px; /* offset by .grid-wrapper padding */
+    left: 10px;
+}
+
+.legend {
+    margin-top: 1.5rem;
+    display: flex;
+    gap: 1.5rem;
+    font-size: 0.875rem;
+    color: var(--text-muted);
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.legend-item .box {
+    width: 16px;
+    height: 16px;
+    border-radius: 2px;
+}
+.box.gray { background-color: var(--cell-unscanned); }
+.box.yellow { background-color: var(--cell-clear); }
+.box.red { background-color: var(--cell-survivor); }
+.box.blue { background-color: #3b82f6; }
+
+
+/* =========================================
+   RIGHT SIDE PANEL
+   ========================================= */
+/* Side panels are handled in layout section above */
+
+.panel-section {
+    padding: 1.5rem;
+    display: flex;
+    flex-direction: column;
+}
+
+.panel-section h2 {
+    font-size: 1rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border);
+}
+
+/* Fleet Status */
+.fleet-status {
+    flex: 0 0 auto;
+}
+
+.drones-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.drone-card {
+    background-color: var(--bg-dark);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.drone-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.drone-name {
+    font-weight: 600;
+    font-family: 'Chakra Petch', sans-serif;
+}
+
+.drone-status-badge {
+    font-size: 0.7rem;
+    padding: 0.15rem 0.5rem;
+    border-radius: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.status-IDLE { background-color: var(--bg-accent); color: white; }
+.status-ON_MISSION { background-color: rgba(59, 130, 246, 0.2); color: var(--primary); }
+.status-RETURNING { background-color: rgba(245, 158, 11, 0.2); color: var(--warning); }
+.status-CHARGING { background-color: rgba(16, 185, 129, 0.2); color: var(--success); }
+
+.battery-bar {
+    height: 6px;
+    background-color: var(--bg-accent);
+    border-radius: 3px;
+    overflow: hidden;
+    position: relative;
+}
+
+.battery-fill {
+    height: 100%;
+    background-color: var(--success);
+    transition: width 0.3s ease;
+}
+
+/* Agent Logs */
+.agent-thoughts {
+    flex: 1;
+    overflow: hidden;
+}
+
+.log-stream {
+    flex: 1;
+    overflow-y: auto;
+    background-color: #0d1117;
+    border-radius: 6px;
+    padding: 1rem;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.9rem;
+    color: #c9d1d9;
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+    border: 1px solid var(--border);
+}
+
+/* Custom Scrollbar */
+.log-stream::-webkit-scrollbar {
+    width: 6px;
+}
+.log-stream::-webkit-scrollbar-track {
+    background: #0d1117;
+}
+.log-stream::-webkit-scrollbar-thumb {
+    background: #30363d;
+    border-radius: 3px;
+}
+
+.log-entry {
+    line-height: 1.6;
+    word-break: break-word;
+    padding: 0.75rem;
+    border-radius: 6px;
+    border-left: 4px solid transparent;
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.log-entry strong {
+    color: var(--primary);
+}
+
+.log-entry.reasoning { 
+    color: #e6edf3; 
+    border-left-color: var(--primary);
+    background: rgba(59, 130, 246, 0.05);
+}
+
+.log-entry.reasoning::before {
+    content: "🧠 COMMANDER REASONING";
+    display: block;
+    font-family: 'Chakra Petch', sans-serif;
+    font-size: 0.7rem;
+    font-weight: 700;
+    margin-bottom: 0.5rem;
+    color: var(--primary);
+    letter-spacing: 1px;
+}
+
+.log-entry.tool { 
+    color: #d2a8ff; 
+    font-family: 'Consolas', monospace;
+    font-size: 0.85rem;
+    border-left-color: #d2a8ff;
+    background: rgba(210, 168, 255, 0.05);
+}
+
+.log-entry.tool::before {
+    content: "📡 DISPATCH COMMAND";
+    display: block;
+    font-family: 'Chakra Petch', sans-serif;
+    font-size: 0.7rem;
+    font-weight: 700;
+    margin-bottom: 0.5rem;
+    color: #d2a8ff;
+    letter-spacing: 1px;
+}
+
+.log-entry.sys-msg { 
+    color: var(--text-muted); 
+    font-size: 0.8rem;
+    font-style: italic;
+    border-left-color: var(--border);
+}
+
+.log-entry.error { 
+    color: #ffa198; 
+    border-left-color: var(--danger);
+    background: rgba(239, 68, 68, 0.05);
+}
+
+@keyframes pulse {
+    0% { transform: scale(1); opacity: 1; }
+    100% { transform: scale(1.1); opacity: 0.8; box-shadow: 0 0 10px red; }
+}
+
+@keyframes pulse {
+    0% { transform: scale(1); opacity: 1; }
+    100% { transform: scale(1.1); opacity: 0.8; box-shadow: 0 0 10px red; }
+}
