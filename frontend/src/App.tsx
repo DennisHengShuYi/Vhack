@@ -51,14 +51,12 @@ export default function App() {
   const recognitionRef = useRef<any>(null);
   const autoRescuedRef = useRef<Set<string>>(new Set());
 
-  // Auto-rescue victims (popup removed temporarily)
+  // Victim popup handling (auto-rescue removed)
   useEffect(() => {
     const waiting = state?.drones?.find((d: any) => d.is_waiting_response);
-    if (waiting && !autoRescuedRef.current.has(waiting.id)) {
-      autoRescuedRef.current.add(waiting.id);
-      fetch(`${API_BASE}/victim-response?drone_id=${waiting.id}`, { method: 'POST' });
+    if (waiting) {
+      setActiveDroneId(waiting.id);
     }
-    if (!waiting) autoRescuedRef.current.clear();
   }, [state]);
 
   // Poll state every 800ms
@@ -304,23 +302,26 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
             <div className="legend">
               {is3DView ? (
                 <>
-                  <span className="legend-item"><div className="dot" style={{ background: '#4b6b4f' }}></div> FLAT</span>
-                  <span className="legend-item"><div className="dot" style={{ background: '#55806a' }}></div> SCANNED</span>
                   <span className="legend-item"><div className="dot" style={{ background: '#6b5f7f' }}></div> MOUNTAIN</span>
                   <span className="legend-item"><div className="dot" style={{ background: '#355f8b' }}></div> LAKE</span>
                   <span className="legend-item"><div className="dot" style={{ background: '#7c2f2f' }}></div> HAZARD</span>
                   <span className="legend-item"><div className="dot" style={{ background: '#00f3ff' }}></div> BASE</span>
-                  <span className="legend-item"><div className="dot" style={{ background: '#ffb300' }}></div> VICTIM</span>
+                  <span className="legend-item"><div className="dot" style={{ border: '2px solid #00f3ff', background: 'transparent' }}></div> DRONE</span>
+                  {stats.mission_active && <>
+                    <span className="legend-item"><div className="dot" style={{ background: '#ff3d3d', boxShadow: '0 0 5px #ff3d3d' }}></div> VICTIM</span>
+                    <span className="legend-item"><div className="dot" style={{ background: 'var(--accent-success)', boxShadow: '0 0 5px var(--accent-success)' }}></div> RESCUED</span>
+                  </>}
                 </>
               ) : (
                 <>
-                  <span className="legend-item"><div className="dot base"></div> BASE</span>
-                  <span className="legend-item"><div className="dot" style={{ background: 'rgba(0,220,200,0.4)', border: '1px solid rgba(0,220,200,0.3)' }}></div> SCANNED</span>
-                  <span className="legend-item"><div className="dot" style={{ background: 'rgba(0,243,255,0.7)' }}></div> DRONE</span>
+                  <span className="legend-item"><div className="dot" style={{ background: 'rgba(107, 95, 127, 0.8)' }}></div> MOUNTAIN</span>
+                  <span className="legend-item"><div className="dot" style={{ background: 'rgba(53, 95, 139, 0.8)' }}></div> LAKE</span>
+                  <span className="legend-item"><div className="dot" style={{ border: '1px solid #ff3d3d', background: 'rgba(124, 47, 47, 0.5)' }}></div> HAZARD</span>
+                  <span className="legend-item"><div className="dot" style={{ background: 'var(--accent-cyan)' }}></div> BASE</span>
+                  <span className="legend-item"><div className="dot" style={{ background: 'rgba(0, 243, 255, 0.7)' }}></div> DRONE</span>
                   {stats.mission_active && <>
-                    <span className="legend-item"><div className="dot victim-hidden"></div> VICTIM</span>
-                    <span className="legend-item"><div className="dot victim-found-dot"></div> DETECTED</span>
-                    <span className="legend-item"><div className="dot" style={{ background: 'rgba(0,200,100,0.5)', border: '1px solid rgba(0,200,100,0.4)' }}></div> RESCUED</span>
+                    <span className="legend-item"><div className="dot" style={{ background: '#ff3d3d', boxShadow: '0 0 5px #ff3d3d' }}></div> VICTIM</span>
+                    <span className="legend-item"><div className="dot" style={{ background: 'var(--accent-success)', boxShadow: '0 0 5px var(--accent-success)' }}></div> RESCUED</span>
                   </>}
                 </>
               )}
@@ -347,12 +348,29 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
                 const dronesAtPos = drones.filter((d: any) => d.x === x && d.y === y);
                 // Permanent victim color: include rescued survivors so the cell stays colored
                 const survivorAtPos = stats.mission_active
-                  ? zone.survivors.find((s: any) => s.x === x && s.y === y && s.found)
+                  ? zone.survivors.find((s: any) => s.x === x && s.y === y)
                   : null;
+                const isVictimFound = !!survivorAtPos?.found;
                 const isVictimRescued = !!survivorAtPos?.rescued;
 
+                const terrain = zone.terrain_types[y][x];
+                const hazard = zone.hazard_cells[y][x];
+
+                let cellClass = "";
+                if (terrain === 'mountain') cellClass += " mountain";
+                else if (terrain === 'lake') cellClass += " lake";
+                if (hazard) cellClass += " hazard";
+
+                if (isBase) cellClass += " base-cell";
+                else if (survivorAtPos) {
+                  if (isVictimRescued) cellClass += " rescued-cell";
+                  else cellClass += " victim-cell"; // All non-rescued victims show as solid red/intel color
+                } else if (isScanned) {
+                  cellClass += " scanned";
+                }
+
                 return (
-                  <div key={i} className={`grid-cell${isBase ? ' base-cell' : ''}${survivorAtPos ? (isVictimRescued ? ' rescued-cell' : ' victim-cell') : (isScanned ? ' scanned' : '')}`}>
+                  <div key={i} className={`grid-cell${cellClass}`}>
                     {stats.mission_active && zone.survivors.find((s: any) => s.x === x && s.y === y && !s.found && !s.rescued) && (
                       <div className="victim-dot" />
                     )}
@@ -458,7 +476,96 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
         </section>
       </main>
 
-      {/* Victim comms popup removed temporarily — auto-rescue active */}
+      {/* --- VICTIM COMMUNICATION POPUP --- */}
+      <AnimatePresence>
+        {waitingDrone && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="victim-popup-overlay"
+          >
+            <motion.div
+              initial={{ scale: 0.9, y: 20, opacity: 0 }}
+              animate={{ scale: 1, y: 0, opacity: 1 }}
+              exit={{ scale: 0.9, y: 20, opacity: 0 }}
+              className="victim-popup glass"
+            >
+              <div className="popup-header">
+                <div className="brand">
+                  <AlertTriangle className="text-amber animate-pulse" size={24} />
+                  <div>
+                    <h2>VICTIM CONTACT</h2>
+                    <span className="subtitle">TRANSCEIVER CHANNEL ACTIVE</span>
+                  </div>
+                </div>
+                <div className="popup-drone-id font-mono">
+                  {waitingDrone.id}
+                </div>
+              </div>
+
+              <div className="popup-body">
+                <div className="comms-segment">
+                  <div className="segment-label">COMMUNICATION</div>
+                  
+                  {!isRecording && !transcription && (
+                    <div className="comms-options">
+                      <p className="comms-hint">Ask the survivor for additional intelligence?</p>
+                      <div className="flex-row gap-2 mt-4">
+                        <button className="cyber-button primary full-w" onClick={toggleVoiceCapture}>
+                          <Volume2 size={16} /> SPEAK TO VICTIM
+                        </button>
+                        <button className="cyber-button secondary full-w" onClick={() => respondToVictim(waitingDrone.id)}>
+                          <Shield size={16} /> NO, JUST RESCUE
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {(isRecording || transcription) && (
+                    <div className="voice-interface">
+                      <div className="voice-status">
+                        {isRecording ? (
+                          <div className="flex items-center gap-2 text-amber">
+                            <div className="recording-dot"></div>
+                            <span>LISTENING...</span>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2 text-success">
+                            <CheckCircle2 size={14} />
+                            <span>READY TO SEND</span>
+                          </div>
+                        )}
+                        <button className="reset-voice" onClick={() => { setTranscription(""); setOperatorMsg(""); if (isRecording) toggleVoiceCapture(); }}>
+                          RESET
+                        </button>
+                      </div>
+
+                      <div className="transcription-area font-mono">
+                        {transcription || (isRecording ? "..." : "")}
+                      </div>
+
+                      {speechError && <div className="speech-error">{speechError}</div>}
+
+                      <div className="flex-row gap-2 mt-4">
+                        {isRecording ? (
+                          <button className="cyber-button amber full-w" onClick={toggleVoiceCapture}>
+                            STOP RECORDING
+                          </button>
+                        ) : (
+                          <button className="cyber-button primary full-w" onClick={() => respondToVictim(waitingDrone.id)}>
+                            <Send size={16} /> TRANSMIT INTEL & RESCUE
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* --- CSS - Inline specifically for the dashboard components --- */}
       <style>{`
@@ -695,9 +802,32 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           border-color: rgba(255, 160, 0, 0.4) !important;
           box-shadow: inset 0 0 6px rgba(255, 160, 0, 0.2);
         }
+        .grid-cell.victim-cell {
+          background: rgba(255, 61, 61, 0.15) !important;
+          border-color: rgba(255, 61, 61, 0.3) !important;
+          box-shadow: inset 0 0 10px rgba(255, 61, 61, 0.1);
+          animation: pulse-red 2s infinite;
+        }
+
         .grid-cell.rescued-cell {
           background: rgba(0, 200, 100, 0.15) !important;
           border-color: rgba(0, 200, 100, 0.3) !important;
+        }
+
+        .grid-cell.mountain { background: rgba(107, 95, 127, 0.4); }
+        .grid-cell.lake { background: rgba(53, 95, 139, 0.6); box-shadow: inset 0 0 10px rgba(53, 95, 139, 0.2); }
+        .grid-cell.hazard { border: 1.5px solid rgba(255, 61, 61, 0.6) !important; background: rgba(124, 47, 47, 0.3); }
+
+        .grid-cell.hidden-victim-cell {
+          background: rgba(255, 61, 61, 0.12) !important;
+          border-color: rgba(255, 61, 61, 0.25) !important;
+          box-shadow: inset 0 0 10px rgba(255, 61, 61, 0.1);
+          animation: pulse-red 2s infinite;
+        }
+        @keyframes pulse-red {
+          0% { background: rgba(255, 61, 61, 0.08); }
+          50% { background: rgba(255, 61, 61, 0.18); }
+          100% { background: rgba(255, 61, 61, 0.08); }
         }
         .drone-marker.multi {
           width: 34px; height: 34px;
@@ -746,8 +876,8 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
         .victim-dot {
           position: absolute; z-index: 8;
           width: 5px; height: 5px; border-radius: 50%;
-          background: rgba(255, 179, 0, 0.45);
-          box-shadow: 0 0 3px rgba(255, 179, 0, 0.3);
+          background: #ff3d3d;
+          box-shadow: 0 0 3px #ff3d3d;
         }
         .victim-found-marker {
           position: absolute; z-index: 12;
@@ -826,9 +956,54 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
         .opacity-70 { opacity: 0.7; }
         .italic { font-style: italic; }
         .panel-header { display: flex; align-items: center; gap: 0.5rem; padding: 0.75rem 1rem; font-size: 0.8rem; font-family: 'Orbitron'; }
-        .drone-card-body {}
-        .drone-telemetry {}
         .drone-list {}
+
+        /* Victim Popup Styles */
+        .victim-popup-overlay {
+          position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+          background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(8px);
+          display: flex; align-items: center; justify-content: center; z-index: 1000;
+        }
+        .victim-popup {
+          width: 500px; padding: 0; border: 1px solid rgba(255, 179, 0, 0.4);
+          overflow: hidden; box-shadow: 0 0 50px rgba(255, 179, 0, 0.15);
+        }
+        .popup-header {
+          padding: 1.5rem; background: rgba(255, 179, 0, 0.1);
+          border-bottom: 1px solid rgba(255, 179, 0, 0.2);
+          display: flex; justify-content: space-between; align-items: center;
+        }
+        .popup-header h2 { margin: 0; font-size: 1.2rem; color: var(--accent-amber); font-family: 'Orbitron'; }
+        .popup-drone-id { padding: 4px 10px; background: var(--accent-amber); color: black; border-radius: 4px; font-weight: bold; }
+        
+        .popup-body { padding: 1.5rem; display: flex; flex-direction: column; gap: 1.5rem; }
+        .segment-label {
+          font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase;
+          letter-spacing: 0.12em; margin-bottom: 0.75rem; font-family: 'Orbitron';
+        }
+        .victim-report {
+          font-style: italic; color: #ffe8b5; font-size: 1.1rem; line-height: 1.5;
+          padding: 1rem; background: rgba(255, 255, 255, 0.03); border-radius: 6px;
+        }
+        
+        .comms-interface { margin-top: 0.5rem; }
+        .comms-hint { color: var(--text-muted); font-size: 0.85rem; text-align: center; }
+        
+        .voice-interface { display: flex; flex-direction: column; gap: 1rem; }
+        .voice-status { display: flex; justify-content: space-between; align-items: center; font-size: 0.75rem; font-weight: bold; }
+        .recording-dot { width: 8px; height: 8px; background: #ff3d3d; border-radius: 50%; animation: pulse 1s infinite; }
+        .transcription-area {
+          min-height: 80px; padding: 1rem; background: rgba(0, 0, 0, 0.3);
+          border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px;
+          color: var(--accent-cyan); font-size: 0.9rem; line-height: 1.4;
+        }
+        .reset-voice { background: none; border: none; color: var(--text-muted); font-size: 0.65rem; cursor: pointer; text-decoration: underline; }
+        .speech-error { color: #ff3d3d; font-size: 0.75rem; padding: 8px; background: rgba(255, 61, 61, 0.1); border-radius: 4px; }
+        
+        .flex-row { display: flex; }
+        .gap-2 { gap: 0.5rem; }
+        .full-w { width: 100%; }
+        .mt-4 { margin-top: 1rem; }
       `}</style>
     </div>
   );

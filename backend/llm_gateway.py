@@ -19,17 +19,20 @@ def get_client():
     llm_model = os.getenv("LLM_MODEL", "")
 
     # Auto-detect provider from available keys if not set
+    openai_key = os.getenv("OPENAI_API_KEY")
+    gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_KEY")
+
     if not provider:
-        if os.getenv("OPENAI_API_KEY"):
+        if openai_key and openai_key.strip():
             provider = "OPENAI"
-        elif os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_KEY"):
+        elif gemini_key and gemini_key.strip():
             provider = "GEMINI"
         else:
             provider = "OPENAI"
 
     if not llm_model:
         if provider == "GEMINI":
-            llm_model = "gemini-2.5-flash"
+            llm_model = "gemini-2.0-flash"
         else:
             llm_model = "gpt-4o"
     else:

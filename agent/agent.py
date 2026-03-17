@@ -14,6 +14,7 @@ import os
 import sys
 import asyncio
 import aiohttp
+from typing import Optional
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from mcp import ClientSession, StdioServerParameters
@@ -114,7 +115,7 @@ class AgentOrchestrator:
         except Exception as e:
             print(f"Failed to broadcast log: {e}", file=sys.stderr)
 
-    def _rule_based_assignments(self, poll_text: str) -> list[tuple[str, str]]:
+    def _rule_based_assignments(self, poll_text: str) -> list[tuple[str, str, Optional[str]]]:
         """
         Fallback: parse the options menu and greedily assign each drone to its
         highest-scored valid option (Opt 1), or return_to_base if none available.
@@ -125,8 +126,8 @@ class AgentOrchestrator:
         for line in poll_text.splitlines():
             line = line.strip()
             if line.startswith("[DRONE:"):
-                # Extract drone ID: "[DRONE: ALPHA-1]"
-                current_drone = line.split("DRONE:")[1].strip().rstrip("]").strip()
+                # Extract drone ID: "[DRONE: ALPHA-1] Battery: 100.0% @ (5,12)"
+                current_drone = line.split("DRONE:")[1].split("]")[0].strip()
             elif line.startswith("Opt 1:") and current_drone:
                 # Extract zone: assign_scan_zone("ALPHA-1", "Z0")
                 if "assign_scan_zone" in line:

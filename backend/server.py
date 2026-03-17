@@ -270,11 +270,12 @@ async def victim_response(drone_id: str, operator_message: Optional[str] = None)
             parse_prompt = (
                 f"You are a rescue dispatcher. Victim at current position said: '{operator_message}'. "
                 "Task: If they mention a location of OTHER survivors (e.g. 'family at (5,6)', 'grid 10', '10,10' or 'sector 2-3'), "
-                "extract the coordinates [x, y] as integers 0-9. "
+                "extract the coordinates [x, y] as integers. "
                 "Instructions: "
-                "1. Grid is 10x10. If they say '10,10' map to (9,9). "
-                "2. If they say 'Grid N' (0-99), N%10 is x, N//10 is y. "
-                "3. If they say 'middle' infer (4,4). "
+                "1. Grid is 20x15 (x: 0-19, y: 0-14). "
+                "2. If they say '10,10' map to (10,10). "
+                "3. If they say 'Grid N' (0-299), x = N % 20, y = N // 20. "
+                "4. If they say 'middle' infer (10,7). "
                 "Output JSON: {\"target\": [x, y], \"reason\": \"...\"}  or if no location mentioned, output {}."
             )
             p_resp = await asyncio.wait_for(
@@ -291,6 +292,13 @@ async def victim_response(drone_id: str, operator_message: Optional[str] = None)
                 reason = data.get("reason", "Reported coordinate")
                 sim.add_victim(tx, ty, f"Survivor intel: {reason}")
                 sim.log(f"AI INTEL PARSED: Target ({tx},{ty}) identified from speech. Reason: {reason}", "AI", drone_id)
+                
+                # Dispatch the current drone to the new target
+                drone.original_pos = [drone.x, drone.y]
+                drone.target_x, drone.target_y = tx, ty
+                drone.voice_override = True
+                drone.path_queue = []
+                sim.log(f"🧠 AI DISPATCH: Re-routing {drone.id} to ({tx},{ty}) for intel search.", "AI", drone_id)
         except Exception as e:
             sim.log(f"Intel parsing error: {e}", "ERROR", drone_id)
 
@@ -433,7 +441,7 @@ def get_grid_state() -> str:
     total_survivors = len(sim.zone.survivors)
 
     if not available:
-        return (f"ALL ZONES COMPLETE. Grid {10}x{10}. "
+        return (f"ALL ZONES COMPLETE. Grid {sim.zone.width}x{sim.zone.height}. "
                 f"Unscanned cells: {unscanned_count}. "
                 f"Survivors Found: {survivors_found}/{total_survivors}.")
 

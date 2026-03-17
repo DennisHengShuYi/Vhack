@@ -102,7 +102,10 @@ export default function Map3D({ zone, drones, baseX, baseY, showRtbOnly }: Props
           const terrain = zone.terrain_types[y][x];
           const scanned = zone.scanned_cells[y][x];
           const hazard = zone.hazard_cells[y][x];
-          const survivorFound = zone.survivors.some((s) => s.x === x && s.y === y && s.found && !s.rescued);
+          const survivorAtPos = zone.survivors.find((s) => s.x === x && s.y === y);
+          const isVictimFound = !!survivorAtPos?.found;
+          const isVictimRescued = !!survivorAtPos?.rescued;
+          const isVictimHidden = survivorAtPos && !isVictimFound && !isVictimRescued;
 
           const { wx, wz } = toWorld(x, y);
           const h = terrainHeight(x, y, terrain);
@@ -133,11 +136,31 @@ export default function Map3D({ zone, drones, baseX, baseY, showRtbOnly }: Props
                 </group>
               )}
 
-              {survivorFound && (
+              {survivorAtPos && !isVictimRescued && (
                 <mesh position={[wx, h + 0.32, wz]} castShadow>
                   <sphereGeometry args={[0.12, 16, 16]} />
-                  <meshStandardMaterial color="#ffb300" emissive="#8a5f00" emissiveIntensity={0.8} />
+                  <meshStandardMaterial color="#ff3d3d" emissive="#800000" emissiveIntensity={0.8} />
                 </mesh>
+              )}
+
+              {isVictimRescued && (
+                <group position={[wx, h + 0.05, wz]}>
+                  {/* Ground Circle */}
+                  <mesh receiveShadow rotation={[-Math.PI / 2, 0, 0]}>
+                    <circleGeometry args={[0.25, 16]} />
+                    <meshStandardMaterial color="#00ff88" transparent opacity={0.3} />
+                  </mesh>
+                  {/* Flag Pole */}
+                  <mesh position={[-0.15, 0.4, -0.15]} castShadow>
+                    <cylinderGeometry args={[0.015, 0.015, 0.8, 8]} />
+                    <meshStandardMaterial color="#ddd" metalness={0.8} />
+                  </mesh>
+                  {/* Flag Cloth */}
+                  <mesh position={[0, 0.7, -0.15]} castShadow>
+                    <boxGeometry args={[0.3, 0.2, 0.02]} />
+                    <meshStandardMaterial color="#00ff88" emissive="#004422" emissiveIntensity={0.5} />
+                  </mesh>
+                </group>
               )}
             </group>
           );
