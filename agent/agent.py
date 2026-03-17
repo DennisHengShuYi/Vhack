@@ -99,14 +99,35 @@ class AgentOrchestrator:
         self.server_script_path = server_script_path
         self.backend_url = "http://127.0.0.1:8000"
 
-        api_key = os.getenv("OPENAI_API_KEY")
-        if api_key:
-            self.llm = ChatOpenAI(model="gpt-4o", temperature=0, streaming=True)
+        openai_key = os.getenv("OPENAI_API_KEY")
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        provider = os.getenv("ACTIVE_PROVIDER", "").upper()
+        model = os.getenv("LLM_MODEL", "")
+
+        if provider == "GEMINI" or (not provider and gemini_key and (not openai_key or not openai_key.strip())):
+            if gemini_key:
+                # Use Gemini via OpenAI-compatible endpoint
+                self.llm = ChatOpenAI(
+                    model=model or "gemini-2.5-flash",
+                    openai_api_key=gemini_key,
+                    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+                    temperature=0,
+                    streaming=True
+                )
+                self.llm_active = True
+                print(f"[SENTINEL] Using Gemini provider with model: {model or 'gemini-2.5-flash'}", file=sys.stderr)
+            else:
+                self.llm = None
+                self.llm_active = False
+                print("[SENTINEL] No GEMINI_API_KEY — rule-based fallback only.", file=sys.stderr)
+        elif openai_key and openai_key.strip():
+            self.llm = ChatOpenAI(model=model or "gpt-4o", temperature=0, streaming=True)
             self.llm_active = True
+            print(f"[SENTINEL] Using OpenAI provider with model: {model or 'gpt-4o'}", file=sys.stderr)
         else:
             self.llm = None
             self.llm_active = False
-            print("[SENTINEL] No OPENAI_API_KEY — rule-based fallback only.", file=sys.stderr)
+            print("[SENTINEL] No API keys — rule-based fallback only.", file=sys.stderr)
 
     async def _broadcast_log(self, session: aiohttp.ClientSession, msg: str):
         """Posts a log entry to the backend, which adds it to the mission log."""

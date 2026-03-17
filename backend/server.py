@@ -90,7 +90,8 @@ async def run_simulation_loop():
                         sim.charge_step(d_id)
                         if not drone.is_charging:
                             drone.returning_to_base = False
-                        continue
+                        else:
+                            continue
 
                     # No target and empty path — awaiting zone assignment from agent
                     if drone.target_x is None and not drone.path_queue:
@@ -119,24 +120,24 @@ async def run_simulation_loop():
                     # Arrived at current step target
                     if drone.x == nx and drone.y == ny and not drone.path_queue:
                         if nx == base_x and ny == base_y:
-                            drone.returning_to_base = True
-                            sim.log(f"🤖 {d_id} returned to base. Switching to charge.", "INFO", d_id)
+                            drone.returning_to_base = False
+                            drone.target_x = None
+                            drone.target_y = None
+                            sim.log(f"🤖 {d_id} reached base station. Commencing recharge.", "INFO", d_id)
                             sim.charge_step(d_id)
                         else:
-                            if drone.voice_override and drone.original_pos and (nx, ny) != tuple(drone.original_pos):
-                                sim.log(f"✅ {d_id} reached voice target ({nx},{ny}). Scanning then returning.", "SUCCESS", d_id)
-                                sim.scan(d_id)
-                                drone.target_x, drone.target_y = drone.original_pos[0], drone.original_pos[1]
-                            elif drone.voice_override and drone.original_pos and (nx, ny) == tuple(drone.original_pos):
-                                sim.log(f"🏠 {d_id} returned to original position. Resuming autonomous mission.", "INFO", d_id)
+                            # Standard autonomous scan logic
+                            result = sim.scan(d_id)
+                            if "THERMAL MATCH" not in result and "VICTIM_DETECTED" not in result:
+                                drone.target_x = None
+                            
+                            # If we just reached the end of an intel interrupt path, log completion
+                            if drone.voice_override and not drone.path_queue:
+                                sim.log(f"✅ {d_id} completed intel search. Awaiting new orders.", "INFO", d_id)
                                 drone.voice_override = False
                                 drone.original_pos = None
-                                drone.target_x = None
                                 drone.status = "IDLE"
-                            else:
-                                result = sim.scan(d_id)
-                                if "THERMAL MATCH" not in result and "VICTIM_DETECTED" not in result:
-                                    drone.target_x = None
+
                             drone.status_label = "SCANNED"
                         continue
 
@@ -177,8 +178,8 @@ async def run_simulation_loop():
                         drone.status = "RETURNING"
                         sim.log(f"🪫 {d_id} battery {drone.battery:.0f}% critical. Initiating RTB.", "WARN", d_id)
 
-                    # Opportunistic scan while passing through unscanned cell
-                    if not sim.zone.scanned_cells[ny][nx]:
+                    # Opportunistic scan while passing through unscanned cell OR if on high-priority intel mission
+                    if not sim.zone.scanned_cells[ny][nx] or drone.voice_override:
                         sim.scan(d_id)
 
         await asyncio.sleep(SIM_TICK)
@@ -293,12 +294,60 @@ async def victim_response(drone_id: str, operator_message: Optional[str] = None)
                 sim.add_victim(tx, ty, f"Survivor intel: {reason}")
                 sim.log(f"AI INTEL PARSED: Target ({tx},{ty}) identified from speech. Reason: {reason}", "AI", drone_id)
                 
-                # Dispatch the current drone to the new target
-                drone.original_pos = [drone.x, drone.y]
-                drone.target_x, drone.target_y = tx, ty
-                drone.voice_override = True
-                drone.path_queue = []
-                sim.log(f"🧠 AI DISPATCH: Re-routing {drone.id} to ({tx},{ty}) for intel search.", "AI", drone_id)
+                # Dispatch Logic: "Intel-Driven Interrupt"
+                dist_current = chebyshev(drone.x, drone.y, tx, ty)
+                selected_drone = None
+                
+                # Selection Criteria A: The "Discovering" Drone
+                if dist_current <= 7 and drone.battery > 30:
+                    selected_drone = drone
+                    sim.log(f"🎯 INTEL DISPATCH: Discovering drone {drone.id} is within radius ({dist_current} cells). Assigning.", "AI", drone_id)
+                else:
+                    # Selection Criteria B: The "Nearest" Drone
+                    min_dist = 999
+                    for d in sim.drones.values():
+                        if d.battery > 35 and not d.is_waiting_response and not d.is_charging:
+                            dist = chebyshev(d.x, d.y, tx, ty)
+                            if dist < min_dist:
+                                min_dist = dist
+                                selected_drone = d
+                    if selected_drone and selected_drone != drone:
+                        sim.log(f"🎯 INTEL DISPATCH: Closest available drone {selected_drone.id} assigned to far-away target ({min_dist} cells).", "AI", selected_drone.id)
+
+                if selected_drone:
+                    # Handoff Protocol: Release current zone with progress
+                    if selected_drone.assigned_zone_id:
+                        zid = selected_drone.assigned_zone_id
+                        zone = sim.zone.zones.get(zid)
+                        if zone:
+                            # Save remaining path for the next drone
+                            zone.residual_path = selected_drone.path_queue
+                            sim.release_zone(zid)
+                            sim.log(f"🔄 HANDOFF: {selected_drone.id} released zone {zid} with {len(zone.residual_path)} cells remaining.", "AI", selected_drone.id)
+                        selected_drone.assigned_zone_id = None
+                        selected_drone.path_queue = []
+
+                    # Save current position (not for return, but as reference)
+                    selected_drone.original_pos = [selected_drone.x, selected_drone.y]
+                    selected_drone.voice_override = True
+                    
+                    # Generate path to intel target
+                    curr_x, curr_y = selected_drone.x, selected_drone.y
+                    to_intel_path = []
+                    while (curr_x, curr_y) != (tx, ty):
+                        if curr_x < tx: curr_x += 1
+                        elif curr_x > tx: curr_x -= 1
+                        if curr_y < ty: curr_y += 1
+                        elif curr_y > ty: curr_y -= 1
+                        to_intel_path.append([curr_x, curr_y])
+                    
+                    # Implementation Strategy: Push to Front
+                    selected_drone.path_queue = to_intel_path
+                    selected_drone.status = "ON_MISSION"
+                    selected_drone.status_label = "INTEL INTERRUPT"
+                    sim.log(f"🧠 AI INTERRUPT: Drone {selected_drone.id} diverted to ({tx},{ty}). Zone progress preserved for handoff.", "AI", selected_drone.id)
+                else:
+                    sim.log(f"⚠️ INTEL DISPATCH FAILED: No drone available with sufficient battery for target ({tx},{ty}).", "WARN", drone_id)
         except Exception as e:
             sim.log(f"Intel parsing error: {e}", "ERROR", drone_id)
 
@@ -349,9 +398,9 @@ async def voice_command(message: str):
     try:
         parse_prompt = (
             f"You are a rescue dispatcher. Command: '{message}'. "
-            "The search area is a 10x10 grid where x and y are 0-9. "
+            "Grid is 20x15 (x: 0-19, y: 0-14). "
             "Rules: "
-            "1. If user says 'grid N' (where N is 0-99), map it to x = N % 10, y = N // 10. "
+            "1. If user says 'grid N' (0-299), x = N % 20, y = N // 20. "
             "2. If user says 'coordinate (X,Y)', map directly. "
             "3. If user says 'sector' or vague location, infer best [x, y]. "
             "Return JSON: {\"target\": [x, y], \"reason\": \"...\"} "
@@ -369,8 +418,8 @@ async def voice_command(message: str):
 
         if data.get("target"):
             tx, ty = data["target"]
-            tx = max(0, min(9, tx))
-            ty = max(0, min(9, ty))
+            tx = max(0, min(sim.zone.width - 1, tx))
+            ty = max(0, min(sim.zone.height - 1, ty))
             if sim.is_inaccessible(tx, ty):
                 accessible_cells = sim.get_unscanned_cells()
                 if accessible_cells:
@@ -391,13 +440,28 @@ async def voice_command(message: str):
                     min_dist = dist
                     best_drone = drone
 
-            if best_drone is not None:
-                best_drone.original_pos = [best_drone.x, best_drone.y]
-                best_drone.target_x, best_drone.target_y = tx, ty
-                best_drone.voice_override = True
-                best_drone.path_queue = []
-                sim.log(f"🧠 AI DISPATCH: Re-routing {best_drone.id} to ({tx},{ty}). Reason: {reason}", "AI", best_drone.id)
-                return {"status": "Command executed", "drone": best_drone.id, "target": [tx, ty]}
+            if best_drone:
+                target_drone = best_drone
+                target_id = target_drone.id
+                # Handoff Protocol: Release current zone with progress
+                current_zone_id = target_drone.assigned_zone_id
+                if current_zone_id:
+                    z = sim.zone.zones.get(current_zone_id)
+                    if z:
+                        # Save remaining path for the next drone
+                        z.residual_path = target_drone.path_queue
+                        sim.release_zone(current_zone_id)
+                        sim.log(f"🔄 HANDOFF (Voice): {target_id} released zone {current_zone_id} with {len(z.residual_path)} cells remaining.", "AI", target_id)
+                    target_drone.assigned_zone_id = None
+                    target_drone.path_queue = []
+
+                target_drone.original_pos = [target_drone.x, target_drone.y]
+                target_drone.target_x, target_drone.target_y = tx, ty
+                target_drone.voice_override = True
+                target_drone.status = "ON_MISSION"
+                target_drone.status_label = "VOICE OVERRIDE"
+                sim.log(f"🧠 AI DISPATCH: Re-routing {target_id} to ({tx},{ty}). Reason: {reason}", "AI", target_id)
+                return {"status": "Command executed", "drone": target_id, "target": [tx, ty]}
             else:
                 return {"status": "No drones available for override"}
 
@@ -451,7 +515,7 @@ def get_grid_state() -> str:
             f"  {z['zone_id']}: ({z['sx']},{z['sy']})->({z['ex']},{z['ey']}) "
             f"scan_cost={z['scan_cost']} priority={z['priority']}"
         )
-    header = (f"Grid 10x10. Unscanned cells: {unscanned_count}. "
+    header = (f"Grid {sim.zone.width}x{sim.zone.height}. Unscanned cells: {unscanned_count}. "
               f"Survivors Found: {survivors_found}/{total_survivors}.\n"
               f"Available Zones ({len(available)}):\n")
     return header + "\n".join(zone_list)

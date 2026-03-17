@@ -958,44 +958,55 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
         .panel-header { display: flex; align-items: center; gap: 0.5rem; padding: 0.75rem 1rem; font-size: 0.8rem; font-family: 'Orbitron'; }
         .drone-list {}
 
-        /* Victim Popup Styles */
+        /* Victim Popup Styles — HUD Toast Mode */
         .victim-popup-overlay {
           position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-          background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(8px);
-          display: flex; align-items: center; justify-content: center; z-index: 1000;
+          background: transparent;
+          display: flex; align-items: flex-end; justify-content: flex-end; 
+          z-index: 1000;
+          pointer-events: none;
+          padding: 2rem;
         }
         .victim-popup {
-          width: 500px; padding: 0; border: 1px solid rgba(255, 179, 0, 0.4);
-          overflow: hidden; box-shadow: 0 0 50px rgba(255, 179, 0, 0.15);
+          width: 420px; padding: 0; 
+          background: rgba(10, 10, 18, 0.95);
+          backdrop-filter: blur(16px);
+          border: 1px solid rgba(255, 179, 0, 0.6);
+          border-radius: 12px;
+          overflow: hidden; 
+          box-shadow: 0 20px 50px rgba(0, 0, 0, 0.8), 0 0 20px rgba(255, 179, 0, 0.15);
+          pointer-events: auto;
         }
         .popup-header {
-          padding: 1.5rem; background: rgba(255, 179, 0, 0.1);
-          border-bottom: 1px solid rgba(255, 179, 0, 0.2);
+          padding: 1.25rem; background: rgba(255, 179, 0, 0.15);
+          border-bottom: 1px solid rgba(255, 179, 0, 0.25);
           display: flex; justify-content: space-between; align-items: center;
         }
-        .popup-header h2 { margin: 0; font-size: 1.2rem; color: var(--accent-amber); font-family: 'Orbitron'; }
-        .popup-drone-id { padding: 4px 10px; background: var(--accent-amber); color: black; border-radius: 4px; font-weight: bold; }
+        .popup-header h2 { margin: 0; font-size: 1.1rem; color: var(--accent-amber); font-family: 'Orbitron'; letter-spacing: 0.05em; }
+        .popup-drone-id { padding: 4px 10px; background: var(--accent-amber); color: black; border-radius: 4px; font-weight: bold; font-size: 0.85rem; }
         
-        .popup-body { padding: 1.5rem; display: flex; flex-direction: column; gap: 1.5rem; }
+        .popup-body { padding: 1.25rem; display: flex; flex-direction: column; gap: 1rem; }
         .segment-label {
           font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase;
-          letter-spacing: 0.12em; margin-bottom: 0.75rem; font-family: 'Orbitron';
+          letter-spacing: 0.12em; margin-bottom: 0.25rem; font-family: 'Orbitron';
         }
         .victim-report {
-          font-style: italic; color: #ffe8b5; font-size: 1.1rem; line-height: 1.5;
+          font-style: italic; color: #ffe8b5; font-size: 1rem; line-height: 1.5;
           padding: 1rem; background: rgba(255, 255, 255, 0.03); border-radius: 6px;
+          border: 1px solid rgba(255, 255, 255, 0.05);
         }
         
-        .comms-interface { margin-top: 0.5rem; }
-        .comms-hint { color: var(--text-muted); font-size: 0.85rem; text-align: center; }
+        .comms-interface { margin-top: 0.25rem; }
+        .comms-hint { color: var(--text-muted); font-size: 0.8rem; text-align: center; line-height: 1.4; }
         
-        .voice-interface { display: flex; flex-direction: column; gap: 1rem; }
-        .voice-status { display: flex; justify-content: space-between; align-items: center; font-size: 0.75rem; font-weight: bold; }
+        .voice-interface { display: flex; flex-direction: column; gap: 0.75rem; }
+        .voice-status { display: flex; justify-content: space-between; align-items: center; font-size: 0.7rem; font-weight: bold; }
         .recording-dot { width: 8px; height: 8px; background: #ff3d3d; border-radius: 50%; animation: pulse 1s infinite; }
         .transcription-area {
-          min-height: 80px; padding: 1rem; background: rgba(0, 0, 0, 0.3);
+          min-height: 60px; padding: 0.85rem; background: rgba(0, 0, 0, 0.4);
           border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px;
-          color: var(--accent-cyan); font-size: 0.9rem; line-height: 1.4;
+          color: var(--accent-cyan); font-size: 0.85rem; line-height: 1.4;
+          box-shadow: inset 0 2px 4px rgba(0,0,0,0.5);
         }
         .reset-voice { background: none; border: none; color: var(--text-muted); font-size: 0.65rem; cursor: pointer; text-decoration: underline; }
         .speech-error { color: #ff3d3d; font-size: 0.75rem; padding: 8px; background: rgba(255, 61, 61, 0.1); border-radius: 4px; }

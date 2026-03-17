@@ -12,7 +12,7 @@ from pydantic import BaseModel
 # ─── Grid Constants ────────────────────────────────────────────────────────────
 GRID_W               = 20
 GRID_H               = 15
-CHARGE_RATE          = 25.0   # % per charge_step call
+CHARGE_RATE          = 34.0   # % per charge_step call
 BATTERY_DRAIN_MOVE   = 1.0    # % per cell moved
 BATTERY_DRAIN_SCAN   = 1.0    # % per thermal scan
 LOW_BATTERY_THRESHOLD = 25.0  # % — recall threshold
@@ -33,6 +33,7 @@ class Zone(BaseModel):
     status: ZoneStatus = ZoneStatus.UNSCANNED
     assigned_to: Optional[str] = None
     priority: str = "MEDIUM"
+    residual_path: List[List[int]] = []
 
 def chebyshev(x1: int, y1: int, x2: int, y2: int) -> int:
     return max(abs(x2 - x1), abs(y2 - y1))
@@ -261,21 +262,24 @@ class SimulationState:
 
         start_x, start_y, end_x, end_y = zone.sx, zone.sy, zone.ex, zone.ey
 
-        corners = [
-            (start_x, start_y),
-            (end_x, start_y),
-            (start_x, end_y),
-            (end_x, end_y)
-        ]
-        best_corner = corners[0]
-        min_dist = chebyshev(drone.x, drone.y, corners[0][0], corners[0][1])
-        for i in range(1, 4):
-            d = chebyshev(drone.x, drone.y, corners[i][0], corners[i][1])
-            if d < min_dist:
-                min_dist = d
-                best_corner = corners[i]
+        if zone.residual_path:
+            target_sx, target_sy = zone.residual_path[0]
+        else:
+            corners = [
+                (start_x, start_y),
+                (end_x, start_y),
+                (start_x, end_y),
+                (end_x, end_y)
+            ]
+            best_corner = corners[0]
+            min_dist = chebyshev(drone.x, drone.y, corners[0][0], corners[0][1])
+            for i in range(1, 4):
+                d = chebyshev(drone.x, drone.y, corners[i][0], corners[i][1])
+                if d < min_dist:
+                    min_dist = d
+                    best_corner = corners[i]
+            target_sx, target_sy = best_corner
 
-        target_sx, target_sy = best_corner
         curr_x, curr_y = drone.x, drone.y
 
         if (curr_x, curr_y) == (target_sx, target_sy):
@@ -288,20 +292,26 @@ class SimulationState:
             elif curr_y > target_sy: curr_y -= 1
             drone.path_queue.append([curr_x, curr_y])
 
-        rev_x = (target_sx == end_x)
-        rev_y = (target_sy == end_y)
-        y_range = range(start_y, end_y + 1)
-        if rev_y:
-            y_range = range(end_y, start_y - 1, -1)
-
-        for i, y in enumerate(y_range):
-            if i % 2 == 0:
-                xs = range(end_x, start_x - 1, -1) if rev_x else range(start_x, end_x + 1)
-            else:
-                xs = range(start_x, end_x + 1) if rev_x else range(end_x, start_x - 1, -1)
-            for x in xs:
-                if not drone.path_queue or drone.path_queue[-1] != [x, y]:
-                    drone.path_queue.append([x, y])
+        if zone.residual_path and len(zone.residual_path) > 0:
+            # First point is already in path_queue due to the transit logic above
+            for i in range(1, len(zone.residual_path)):
+                drone.path_queue.append(zone.residual_path[i])
+            zone.residual_path = []
+        else:
+            rev_x = (target_sx == end_x)
+            rev_y = (target_sy == end_y)
+            y_range = range(start_y, end_y + 1)
+            if rev_y:
+                y_range = range(end_y, start_y - 1, -1)
+ 
+            for i, y in enumerate(y_range):
+                if i % 2 == 0:
+                    xs = range(end_x, start_x - 1, -1) if rev_x else range(start_x, end_x + 1)
+                else:
+                    xs = range(start_x, end_x + 1) if rev_x else range(end_x, start_x - 1, -1)
+                for x in xs:
+                    if not drone.path_queue or drone.path_queue[-1] != [x, y]:
+                        drone.path_queue.append([x, y])
 
         return {
             "success": True,
@@ -391,6 +401,10 @@ class SimulationState:
             drone.charge_cycles += 1
             drone.status = "IDLE"
             drone.status_label = "READY"
+            drone.target_x = None
+            drone.target_y = None
+            drone.returning_to_base = False
+            drone.voice_override = False
             msg = f"[BATTERY] {drone_id} fully charged. Ready for deployment."
             self.log(msg, "CHARGE", drone_id)
         else:

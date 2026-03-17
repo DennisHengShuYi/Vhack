@@ -11,10 +11,8 @@ _model = None
 
 
 def get_client():
-    global _client, _model
-    if _client is not None:
-        return _client, _model
-
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
     provider = os.getenv("ACTIVE_PROVIDER", "").upper()
     llm_model = os.getenv("LLM_MODEL", "")
 
@@ -32,7 +30,7 @@ def get_client():
 
     if not llm_model:
         if provider == "GEMINI":
-            llm_model = "gemini-2.0-flash"
+            llm_model = "gemini-2.5-flash"
         else:
             llm_model = "gpt-4o"
     else:
