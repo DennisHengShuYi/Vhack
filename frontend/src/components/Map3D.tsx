@@ -58,7 +58,8 @@ function toWorld(x: number, y: number) {
 
 function terrainHeight(x: number, y: number, terrain: string) {
   const noise = Math.sin(x * 0.7) * 0.1 + Math.cos(y * 0.6) * 0.1;
-  if (terrain === 'mountain') return MOUNTAIN_HEIGHT + noise;
+  if (terrain === 'city') return MOUNTAIN_HEIGHT * 0.6 + noise;
+  if (terrain === 'forest') return FLAT_BASE_HEIGHT + 0.15 + noise;
   if (terrain === 'lake') return LAKE_DEPTH;
   return FLAT_BASE_HEIGHT + noise;
 }
@@ -110,28 +111,72 @@ export default function Map3D({ zone, drones, baseX, baseY, showRtbOnly }: Props
           const { wx, wz } = toWorld(x, y);
           const h = terrainHeight(x, y, terrain);
 
+          // Base terrain color — scanned tints per terrain type instead of flat override
           let color = '#4b6b4f';
-          if (terrain === 'mountain') color = '#6b5f7f';
-          if (terrain === 'lake') color = '#355f8b';
-          if (scanned) color = '#55806a';
-          if (hazard) color = '#7c2f2f';
+          let metalness = 0.02;
+          let roughness = 0.9;
+          if (terrain === 'city') { color = scanned ? '#9aab90' : '#8a8a7a'; metalness = 0.18; roughness = 0.65; }
+          else if (terrain === 'forest') { color = scanned ? '#3a8050' : '#2a5c35'; }
+          else if (terrain === 'lake') { color = '#1e4a7a'; metalness = 0.3; roughness = 0.15; }
+          else { color = scanned ? '#55806a' : '#4b6b4f'; }
+          if (hazard && terrain !== 'lake') color = '#7c2f2f';
+
+          // Mini-building params for city cells
+          const hasBldg = terrain === 'city' && !hazard && (x * 3 + y * 7) % 5 !== 0;
+          const bldgH = 0.12 + ((x * 13 + y * 7) % 5) * 0.07;
+          const bldgW = 0.28 + ((x * 5 + y * 11) % 3) * 0.08;
+
+          // Forest tree positions (2 trees per cell if density matches)
+          const hasTree1 = terrain === 'forest' && !hazard && (x + y) % TREE_DENSITY === 0;
+          const hasTree2 = terrain === 'forest' && !hazard && (x * 2 + y) % (TREE_DENSITY + 1) === 0;
 
           return (
             <group key={`cell-${x}-${y}`}>
+              {/* Terrain base block */}
               <mesh position={[wx, h / 2, wz]} castShadow receiveShadow>
                 <boxGeometry args={[1.08, Math.max(0.06, h), 1.08]} />
-                <meshStandardMaterial color={color} roughness={0.9} metalness={0.02} />
+                <meshStandardMaterial color={color} roughness={roughness} metalness={metalness} />
               </mesh>
 
-              {terrain === 'flat' && !hazard && (x + y) % TREE_DENSITY === 0 && (
+              {/* Lake: transparent water surface */}
+              {terrain === 'lake' && (
+                <mesh position={[wx, -0.02, wz]} rotation={[-Math.PI / 2, 0, 0]}>
+                  <planeGeometry args={[1.06, 1.06]} />
+                  <meshStandardMaterial color="#3a90d8" transparent opacity={0.45} metalness={0.6} roughness={0.05} />
+                </mesh>
+              )}
+
+              {/* City: small building on top */}
+              {hasBldg && (
+                <mesh position={[wx + (((x * 7) % 3) - 1) * 0.18, h + bldgH / 2, wz + (((y * 5) % 3) - 1) * 0.18]} castShadow>
+                  <boxGeometry args={[bldgW, bldgH, bldgW]} />
+                  <meshStandardMaterial color={scanned ? '#b0b8a0' : '#9a9a88'} roughness={0.5} metalness={0.25} />
+                </mesh>
+              )}
+
+              {/* Forest tree 1 */}
+              {hasTree1 && (
                 <group position={[wx + 0.18, h + 0.12, wz - 0.08]}>
                   <mesh castShadow>
-                    <cylinderGeometry args={[0.05, 0.08, 0.25, 8]} />
+                    <cylinderGeometry args={[0.04, 0.07, 0.22, 8]} />
                     <meshStandardMaterial color="#5f472f" />
                   </mesh>
-                  <mesh position={[0, 0.22, 0]} castShadow>
-                    <coneGeometry args={[0.2, 0.45, 10]} />
-                    <meshStandardMaterial color="#2f6a3f" />
+                  <mesh position={[0, 0.24, 0]} castShadow>
+                    <coneGeometry args={[0.22, 0.5, 10]} />
+                    <meshStandardMaterial color="#1a4a25" />
+                  </mesh>
+                </group>
+              )}
+              {/* Forest tree 2 (offset) */}
+              {hasTree2 && (
+                <group position={[wx - 0.15, h + 0.1, wz + 0.14]}>
+                  <mesh castShadow>
+                    <cylinderGeometry args={[0.035, 0.06, 0.18, 8]} />
+                    <meshStandardMaterial color="#4a3520" />
+                  </mesh>
+                  <mesh position={[0, 0.18, 0]} castShadow>
+                    <coneGeometry args={[0.17, 0.38, 10]} />
+                    <meshStandardMaterial color="#163d1e" />
                   </mesh>
                 </group>
               )}

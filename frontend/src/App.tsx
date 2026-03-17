@@ -2,7 +2,6 @@ import { useState, useEffect, useRef } from 'react';
 import {
   Shield,
   Cpu,
-
   Search,
   Battery,
   Activity,
@@ -18,7 +17,9 @@ import {
   Zap,
   Power,
   Wifi,
-  WifiOff
+  WifiOff,
+  Info,
+  X
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import Map3D from './components/Map3D';
@@ -46,8 +47,11 @@ export default function App() {
   const [showRtbOnly, setShowRtbOnly] = useState(false);
   const [is3DView, setIs3DView] = useState(false);
   const [victimCount, setVictimCount] = useState(10);
+  const [showAssumptions, setShowAssumptions] = useState(false);
 
   const logEndRef = useRef<HTMLDivElement>(null);
+  const logScrollRef = useRef<HTMLDivElement>(null);
+  const [userScrolledUp, setUserScrolledUp] = useState(false);
   const recognitionRef = useRef<any>(null);
   const autoRescuedRef = useRef<Set<string>>(new Set());
 
@@ -58,6 +62,13 @@ export default function App() {
       setActiveDroneId(waiting.id);
     }
   }, [state]);
+
+  // Auto-scroll log to bottom when new entries arrive (unless user scrolled up)
+  useEffect(() => {
+    if (!userScrolledUp && logEndRef.current) {
+      logEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }
+  }, [state, logFilter, userScrolledUp]);
 
   // Poll state every 800ms
   useEffect(() => {
@@ -81,7 +92,6 @@ export default function App() {
 
   const runMission = async () => {
     setIsDeploying(true);
-    await fetch(`${API_BASE}/reset?num_victims=${victimCount}`, { method: 'POST' });
     await fetch(`${API_BASE}/run-mission`, { method: 'POST' });
     setTimeout(() => setIsDeploying(false), 2000);
   };
@@ -156,7 +166,7 @@ export default function App() {
   };
 
   const resetMission = async () => {
-    await fetch(`${API_BASE}/reset`, { method: 'POST' });
+    await fetch(`${API_BASE}/reset?num_victims=${victimCount}`, { method: 'POST' });
     setActiveDroneId(null);
     setIsTalking(null);
   };
@@ -215,29 +225,39 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
         </div>
 
         <div className="header-actions">
-          {!stats.mission_active && (
-            <div className="victim-stepper">
-              <span className="victim-stepper-label">SURVIVORS</span>
-              <div className="stepper-control">
-                <button className="stepper-btn" onClick={() => setVictimCount(c => Math.max(1, c - 1))}>−</button>
-                <span className="stepper-value font-mono">{victimCount}</span>
-                <button className="stepper-btn" onClick={() => setVictimCount(c => Math.min(50, c + 1))}>+</button>
-              </div>
-            </div>
-          )}
           {stats.mission_active ? (
-            <button className="cyber-button danger" onClick={stopMission}>
-              STOP MISSION
-            </button>
+            <button className="cyber-button danger" onClick={stopMission}>STOP MISSION</button>
           ) : (
             <button className="cyber-button primary" onClick={runMission} disabled={isDeploying}>
-              {isDeploying ? <RefreshCcw className="animate-spin" size={16} /> : "DEPLOY SWARM"}
+              {isDeploying ? <RefreshCcw className="animate-spin" size={14} /> : <Zap size={14} />}
+              {isDeploying ? ' DEPLOYING…' : ' DEPLOY SWARM'}
             </button>
           )}
-          <button className={`cyber-button toggle-3d ${is3DView ? 'active' : ''}`} onClick={() => setIs3DView(p => !p)}>
-            3D VIEW
+
+          <div className="header-divider" />
+
+          {/* Victim count — only changeable when mission not active; applies on Reset */}
+          <div className={`victim-inline ${stats.mission_active ? 'locked' : ''}`}>
+            <span className="victim-inline-label">SURVIVORS</span>
+            <div className="victim-inline-controls">
+              <button className="vic-adj" disabled={stats.mission_active} onClick={() => setVictimCount(c => Math.max(1, c - 1))}>−</button>
+              <span className="vic-count font-mono">{victimCount}</span>
+              <button className="vic-adj" disabled={stats.mission_active} onClick={() => setVictimCount(c => Math.min(50, c + 1))}>+</button>
+            </div>
+          </div>
+          <button
+            className="cyber-button secondary reset-btn"
+            onClick={resetMission}
+            disabled={stats.mission_active}
+            title={`Reset map with ${victimCount} survivors`}
+          >
+            <RefreshCcw size={13} /> RESET
           </button>
-          <button className="cyber-button secondary" onClick={resetMission} disabled={stats.mission_active}>RESET</button>
+
+          <div className="header-divider" />
+
+          <button className={`cyber-button toggle-3d ${is3DView ? 'active' : ''}`} onClick={() => setIs3DView(p => !p)}>3D</button>
+          <button className="cyber-button info-btn" onClick={() => setShowAssumptions(true)} title="Simulation Parameters"><Info size={15} /></button>
         </div>
       </header>
 
@@ -300,31 +320,18 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           <div className="map-overlay-header">
             <span className="font-mono text-xs"><Crosshair size={12} /> OVERLAY</span>
             <div className="legend">
-              {is3DView ? (
-                <>
-                  <span className="legend-item"><div className="dot" style={{ background: '#6b5f7f' }}></div> MOUNTAIN</span>
-                  <span className="legend-item"><div className="dot" style={{ background: '#355f8b' }}></div> LAKE</span>
-                  <span className="legend-item"><div className="dot" style={{ background: '#7c2f2f' }}></div> HAZARD</span>
-                  <span className="legend-item"><div className="dot" style={{ background: '#00f3ff' }}></div> BASE</span>
-                  <span className="legend-item"><div className="dot" style={{ border: '2px solid #00f3ff', background: 'transparent' }}></div> DRONE</span>
-                  {stats.mission_active && <>
-                    <span className="legend-item"><div className="dot" style={{ background: '#ff3d3d', boxShadow: '0 0 5px #ff3d3d' }}></div> VICTIM</span>
-                    <span className="legend-item"><div className="dot" style={{ background: 'var(--accent-success)', boxShadow: '0 0 5px var(--accent-success)' }}></div> RESCUED</span>
-                  </>}
-                </>
-              ) : (
-                <>
-                  <span className="legend-item"><div className="dot" style={{ background: 'rgba(107, 95, 127, 0.8)' }}></div> MOUNTAIN</span>
-                  <span className="legend-item"><div className="dot" style={{ background: 'rgba(53, 95, 139, 0.8)' }}></div> LAKE</span>
-                  <span className="legend-item"><div className="dot" style={{ border: '1px solid #ff3d3d', background: 'rgba(124, 47, 47, 0.5)' }}></div> HAZARD</span>
-                  <span className="legend-item"><div className="dot" style={{ background: 'var(--accent-cyan)' }}></div> BASE</span>
-                  <span className="legend-item"><div className="dot" style={{ background: 'rgba(0, 243, 255, 0.7)' }}></div> DRONE</span>
-                  {stats.mission_active && <>
-                    <span className="legend-item"><div className="dot" style={{ background: '#ff3d3d', boxShadow: '0 0 5px #ff3d3d' }}></div> VICTIM</span>
-                    <span className="legend-item"><div className="dot" style={{ background: 'var(--accent-success)', boxShadow: '0 0 5px var(--accent-success)' }}></div> RESCUED</span>
-                  </>}
-                </>
-              )}
+              <>
+                <span className="legend-item"><div className="dot" style={{ background: '#8a8a7a' }}></div> CITY</span>
+                <span className="legend-item"><div className="dot" style={{ background: '#2a5c35' }}></div> FOREST</span>
+                <span className="legend-item"><div className="dot" style={{ background: '#355f8b' }}></div> LAKE</span>
+                <span className="legend-item"><div className="dot" style={{ background: 'rgba(55,145,80,0.68)', border: '1px solid rgba(0,220,200,0.45)' }}></div> SCANNED</span>
+                <span className="legend-item"><div className="dot" style={{ background: '#00f3ff' }}></div> BASE</span>
+                <span className="legend-item"><div className="dot" style={{ background: 'rgba(0, 243, 255, 0.7)' }}></div> DRONE</span>
+                {stats.mission_active && <>
+                  <span className="legend-item"><div className="dot" style={{ background: '#ff3d3d', boxShadow: '0 0 5px #ff3d3d' }}></div> VICTIM</span>
+                  <span className="legend-item"><div className="dot" style={{ background: 'var(--accent-success)', boxShadow: '0 0 5px var(--accent-success)' }}></div> RESCUED</span>
+                </>}
+              </>
             </div>
           </div>
 
@@ -357,20 +364,23 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
                 const hazard = zone.hazard_cells[y][x];
 
                 let cellClass = "";
-                if (terrain === 'mountain') cellClass += " mountain";
+                if (terrain === 'city') cellClass += " city-terrain";
+                else if (terrain === 'forest') cellClass += " forest-terrain";
                 else if (terrain === 'lake') cellClass += " lake";
-                if (hazard) cellClass += " hazard";
+                // hazard only for non-lake cells (lakes are naturally impassable, not red)
+                if (hazard && terrain !== 'lake') cellClass += " hazard";
 
+                // Scanned applies on top of terrain — NOT mutually exclusive
+                if (isScanned) cellClass += " scanned";
                 if (isBase) cellClass += " base-cell";
                 else if (survivorAtPos) {
                   if (isVictimRescued) cellClass += " rescued-cell";
-                  else cellClass += " victim-cell"; // All non-rescued victims show as solid red/intel color
-                } else if (isScanned) {
-                  cellClass += " scanned";
+                  else cellClass += " victim-cell";
                 }
 
                 return (
                   <div key={i} className={`grid-cell${cellClass}`}>
+                    {isScanned && <div className="scan-tick" />}
                     {stats.mission_active && zone.survivors.find((s: any) => s.x === x && s.y === y && !s.found && !s.rescued) && (
                       <div className="victim-dot" />
                     )}
@@ -439,7 +449,26 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
               <button className={`log-filter-btn ${logFilter === 'victim_found' ? 'active' : ''}`} onClick={() => setLogFilter('victim_found')}>VICTIM</button>
             </div>
           </div>
-          <div className="log-scroll glass">
+          <div
+            className="log-scroll glass"
+            ref={logScrollRef}
+            onScroll={(e) => {
+              const el = e.currentTarget;
+              const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+              setUserScrolledUp(!nearBottom);
+            }}
+          >
+            {userScrolledUp && (
+              <button
+                className="scroll-to-latest-btn"
+                onClick={() => {
+                  logEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+                  setUserScrolledUp(false);
+                }}
+              >
+                ↓ Latest
+              </button>
+            )}
             <div className="mission-log font-mono">
               {filteredLog.length === 0 && (
                 <div className="log-empty"><Cpu size={20} className="animate-pulse" /><span>Awaiting SENTINEL activity...</span></div>
@@ -567,6 +596,130 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
         )}
       </AnimatePresence>
 
+      {/* --- ASSUMPTIONS MODAL --- */}
+      <AnimatePresence>
+        {showAssumptions && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="assumptions-overlay"
+            onClick={() => setShowAssumptions(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.92, y: 24, opacity: 0 }}
+              animate={{ scale: 1, y: 0, opacity: 1 }}
+              exit={{ scale: 0.92, y: 24, opacity: 0 }}
+              className="assumptions-modal glass"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="assumptions-header">
+                <div className="brand">
+                  <Info size={20} style={{ color: 'var(--accent-cyan)' }} />
+                  <div>
+                    <h2>SIMULATION PARAMETERS</h2>
+                    <span className="subtitle">Design assumptions &amp; engine constants</span>
+                  </div>
+                </div>
+                <button className="close-btn" onClick={() => setShowAssumptions(false)}><X size={18} /></button>
+              </div>
+
+              <div className="assumptions-body">
+                {/* Terrain */}
+                <div className="assump-section">
+                  <div className="assump-section-title">🗺️ TERRAIN SYSTEM</div>
+                  <table className="assump-table">
+                    <thead>
+                      <tr><th>Terrain</th><th>Survivor Weight</th><th>Passable</th><th>Battery / Move</th><th>Visual</th></tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td><span className="terrain-badge city">CITY</span></td>
+                        <td className="highlight">5× (dense population)</td>
+                        <td className="ok">✓ Yes</td>
+                        <td>1.0%</td>
+                        <td><div className="swatch" style={{ background: '#8a8a7a' }}></div></td>
+                      </tr>
+                      <tr>
+                        <td><span className="terrain-badge forest">FOREST</span></td>
+                        <td>2× (hikers / campers)</td>
+                        <td className="ok">✓ Yes</td>
+                        <td className="warn-text">1.5% ↑</td>
+                        <td><div className="swatch" style={{ background: '#2a5c35' }}></div></td>
+                      </tr>
+                      <tr>
+                        <td><span className="terrain-badge flat">FLAT</span></td>
+                        <td>1× (baseline)</td>
+                        <td className="ok">✓ Yes</td>
+                        <td>1.0%</td>
+                        <td><div className="swatch" style={{ background: '#4b6b4f' }}></div></td>
+                      </tr>
+                      <tr>
+                        <td><span className="terrain-badge lake">LAKE</span></td>
+                        <td className="muted">0 (nobody in water)</td>
+                        <td className="err">✗ No</td>
+                        <td className="muted">—</td>
+                        <td><div className="swatch" style={{ background: '#355f8b' }}></div></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Zone Priority */}
+                <div className="assump-section">
+                  <div className="assump-section-title">🎯 ZONE PRIORITY (auto-computed from terrain)</div>
+                  <table className="assump-table">
+                    <thead><tr><th>Priority</th><th>Condition</th><th>Effect</th></tr></thead>
+                    <tbody>
+                      <tr><td><span className="pri-badge high">HIGH</span></td><td>≥ 4 city cells in zone</td><td>Drone prefers this zone when transit distance is similar</td></tr>
+                      <tr><td><span className="pri-badge medium">MEDIUM</span></td><td>1–3 city cells in zone</td><td>Normal priority</td></tr>
+                      <tr><td><span className="pri-badge low">LOW</span></td><td>0 city cells in zone</td><td>Deferred — assigned last when others are covered</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Battery */}
+                <div className="assump-section">
+                  <div className="assump-section-title">🔋 BATTERY MODEL</div>
+                  <div className="assump-kv-grid">
+                    <div className="kv-row"><span>Flat / City move cost</span><span className="kv-val">1.0% / cell</span></div>
+                    <div className="kv-row"><span>Forest move cost</span><span className="kv-val warn-text">1.5% / cell</span></div>
+                    <div className="kv-row"><span>Thermal scan cost</span><span className="kv-val">1.0% / scan</span></div>
+                    <div className="kv-row"><span>Charge rate</span><span className="kv-val ok">+34% / charge step</span></div>
+                    <div className="kv-row"><span>Low battery recall threshold</span><span className="kv-val warn-text">≤ 25%</span></div>
+                    <div className="kv-row"><span>Emergency reserve (post-RTB)</span><span className="kv-val">8%</span></div>
+                  </div>
+                </div>
+
+                {/* Thermal scan */}
+                <div className="assump-section">
+                  <div className="assump-section-title">🔭 THERMAL DETECTION</div>
+                  <div className="assump-kv-grid">
+                    <div className="kv-row"><span>Detection algorithm</span><span className="kv-val">Gaussian thermal bloom (5×5 matrix)</span></div>
+                    <div className="kv-row"><span>Positive detection threshold</span><span className="kv-val highlight">max_heat ≥ 78 AND contrast ≥ 28</span></div>
+                    <div className="kv-row"><span>Survivor heat range</span><span className="kv-val">80–98°C (simulated body heat)</span></div>
+                    <div className="kv-row"><span>Ambient background</span><span className="kv-val">20–38°C (random noise)</span></div>
+                  </div>
+                </div>
+
+                {/* Grid / Agent */}
+                <div className="assump-section">
+                  <div className="assump-section-title">🤖 AGENT &amp; GRID</div>
+                  <div className="assump-kv-grid">
+                    <div className="kv-row"><span>Grid size</span><span className="kv-val">20 × 15 = 300 cells</span></div>
+                    <div className="kv-row"><span>Search zones</span><span className="kv-val">12 zones (5×5 each, 4 col × 3 row)</span></div>
+                    <div className="kv-row"><span>Drone fleet</span><span className="kv-val">5 × ALPHA drones</span></div>
+                    <div className="kv-row"><span>Sim tick rate</span><span className="kv-val">0.7 s / step</span></div>
+                    <div className="kv-row"><span>Distance metric</span><span className="kv-val">Chebyshev (diagonal = 1 step)</span></div>
+                    <div className="kv-row"><span>Path planning</span><span className="kv-val">Zig-zag scan + diagonal transit to nearest corner</span></div>
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* --- CSS - Inline specifically for the dashboard components --- */}
       <style>{`
         .app-container {
@@ -632,7 +785,17 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
 
         .tab-content { flex: 1; padding: 1rem; position: relative; overflow: hidden; }
         .scroll-area { overflow-y: auto; }
-        .log-scroll { flex: 1; padding: 1rem; overflow-y: auto; }
+        .log-scroll { flex: 1; padding: 1rem; overflow-y: auto; position: relative; }
+        .scroll-to-latest-btn {
+          position: sticky; top: 0; left: 50%; transform: translateX(-50%);
+          display: block; margin: 0 auto 8px;
+          background: rgba(165, 243, 252, 0.15); color: #a5f3fc;
+          border: 1px solid rgba(165, 243, 252, 0.4); border-radius: 999px;
+          padding: 4px 14px; font-size: 0.7rem; cursor: pointer; z-index: 10;
+          font-family: 'Orbitron', sans-serif; letter-spacing: 0.05em;
+          backdrop-filter: blur(4px);
+        }
+        .scroll-to-latest-btn:hover { background: rgba(165, 243, 252, 0.25); }
 
         .telemetry-toolbar {
           display: flex;
@@ -796,7 +959,41 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           transform-style: preserve-3d;
           transition: background-color 0.4s;
         }
-        .grid-cell.scanned { background: rgba(0, 220, 200, 0.13); border-color: rgba(0,220,200,0.08); }
+        /* ── Scanned state — clearly visible over every terrain type ── */
+        .grid-cell.scanned {
+          border-color: rgba(0, 220, 200, 0.45) !important;
+        }
+        /* Flat scanned: cyan wash */
+        .grid-cell.scanned:not(.city-terrain):not(.forest-terrain):not(.lake) {
+          background: rgba(0, 180, 160, 0.28);
+        }
+        /* City scanned: bleached concrete — much lighter than unscanned grey */
+        .grid-cell.city-terrain.scanned {
+          background: rgba(195, 200, 178, 0.65) !important;
+        }
+        /* Forest scanned: bright canopy green — clearly lighter than deep forest */
+        .grid-cell.forest-terrain.scanned {
+          background: rgba(55, 145, 80, 0.68) !important;
+        }
+        /* Diagonal scan-lines overlay on all scanned cells */
+        .grid-cell.scanned::after {
+          content: '' !important;
+          position: absolute !important; inset: 0 !important;
+          background: repeating-linear-gradient(
+            -45deg,
+            transparent 0px, transparent 4px,
+            rgba(0, 220, 200, 0.10) 4px, rgba(0, 220, 200, 0.10) 5px
+          ) !important;
+          pointer-events: none !important; z-index: 2 !important;
+        }
+        /* Small scan-complete dot in top-right corner */
+        .scan-tick {
+          position: absolute; top: 1px; right: 1px;
+          width: 4px; height: 4px; border-radius: 50%;
+          background: rgba(0, 220, 200, 0.85);
+          box-shadow: 0 0 3px rgba(0, 220, 200, 0.7);
+          z-index: 6; pointer-events: none;
+        }
         .grid-cell.victim-cell {
           background: rgba(255, 160, 0, 0.22) !important;
           border-color: rgba(255, 160, 0, 0.4) !important;
@@ -814,8 +1011,50 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           border-color: rgba(0, 200, 100, 0.3) !important;
         }
 
-        .grid-cell.mountain { background: rgba(107, 95, 127, 0.4); }
-        .grid-cell.lake { background: rgba(53, 95, 139, 0.6); box-shadow: inset 0 0 10px rgba(53, 95, 139, 0.2); }
+        .grid-cell.city-terrain {
+          background: rgba(138, 138, 122, 0.45);
+          border-color: rgba(180, 180, 160, 0.25);
+        }
+        .grid-cell.city-terrain::after {
+          content: '';
+          position: absolute; inset: 1px;
+          background: repeating-linear-gradient(
+            90deg,
+            transparent 0px,
+            transparent 3px,
+            rgba(200,200,180,0.08) 3px,
+            rgba(200,200,180,0.08) 4px
+          );
+          pointer-events: none;
+        }
+        .grid-cell.forest-terrain {
+          background: rgba(42, 92, 53, 0.55);
+          border-color: rgba(42, 120, 60, 0.3);
+        }
+        .grid-cell.forest-terrain::after {
+          content: '';
+          position: absolute; inset: 1px;
+          background: radial-gradient(circle at 30% 40%, rgba(30,80,40,0.35) 30%, transparent 70%),
+                      radial-gradient(circle at 70% 65%, rgba(20,70,30,0.3) 25%, transparent 60%);
+          pointer-events: none;
+        }
+        .grid-cell.lake {
+          background: rgba(30, 80, 140, 0.65);
+          border-color: rgba(53, 130, 200, 0.35);
+          box-shadow: inset 0 0 8px rgba(53, 95, 139, 0.35);
+        }
+        .grid-cell.lake::after {
+          content: '';
+          position: absolute; inset: 1px;
+          background: repeating-linear-gradient(
+            155deg,
+            transparent 0px,
+            transparent 4px,
+            rgba(100, 180, 255, 0.06) 4px,
+            rgba(100, 180, 255, 0.06) 5px
+          );
+          pointer-events: none;
+        }
         .grid-cell.hazard { border: 1.5px solid rgba(255, 61, 61, 0.6) !important; background: rgba(124, 47, 47, 0.3); }
 
         .grid-cell.hidden-victim-cell {
@@ -887,20 +1126,37 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
         .dot.victim-hidden { background: rgba(255,179,0,0.4); }
         .dot.victim-found-dot { background: var(--accent-amber); box-shadow: 0 0 4px var(--accent-amber); }
 
-        .victim-stepper {
-          display: flex; flex-direction: column; align-items: center; gap: 4px;
-          padding: 6px 12px;
-          border: 1px solid rgba(255,179,0,0.3);
-          border-radius: 8px;
-          background: rgba(255,179,0,0.05);
+        /* ── Compact victim inline control ── */
+        .victim-inline {
+          display: flex; flex-direction: column; align-items: center; gap: 2px;
         }
-        .victim-stepper-label {
-          font-family: 'Orbitron', sans-serif; font-size: 0.6rem;
-          color: var(--accent-amber); letter-spacing: 0.1em; opacity: 0.8;
+        .victim-inline.locked { opacity: 0.35; pointer-events: none; }
+        .victim-inline-label {
+          font-family: 'Orbitron', sans-serif; font-size: 0.55rem;
+          letter-spacing: 0.12em; color: var(--accent-amber); opacity: 0.7;
         }
-        .stepper-control { display: flex; align-items: center; gap: 8px; }
+        .victim-inline-controls { display: flex; align-items: center; gap: 6px; }
+        .vic-adj {
+          width: 22px; height: 22px; border-radius: 5px;
+          border: 1px solid rgba(255,179,0,0.45);
+          background: rgba(255,179,0,0.08);
+          color: var(--accent-amber); font-size: 1rem; line-height: 1;
+          cursor: pointer; display: flex; align-items: center; justify-content: center;
+          transition: background 0.12s;
+        }
+        .vic-adj:hover:not(:disabled) { background: rgba(255,179,0,0.22); }
+        .vic-adj:disabled { opacity: 0.35; cursor: default; }
+        .vic-count {
+          font-size: 1.1rem; font-weight: bold;
+          color: var(--accent-amber); min-width: 26px; text-align: center;
+        }
+        .reset-btn { display: flex; align-items: center; gap: 5px; }
+        .header-divider {
+          width: 1px; height: 28px;
+          background: rgba(255,255,255,0.08); margin: 0 2px;
+        }
         .stepper-btn {
-          width: 22px; height: 22px; border-radius: 4px;
+          width: 20px; height: 20px; border-radius: 3px;
           border: 1px solid rgba(255,179,0,0.4);
           background: rgba(255,179,0,0.08);
           color: var(--accent-amber); font-size: 1rem; line-height: 1;
@@ -908,10 +1164,6 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           transition: background 0.15s;
         }
         .stepper-btn:hover { background: rgba(255,179,0,0.2); }
-        .stepper-value {
-          font-size: 1.2rem; font-weight: bold;
-          color: var(--accent-amber); min-width: 28px; text-align: center;
-        }
         .base-icon { color: var(--accent-cyan); opacity: 0.5; }
         .toggle-3d { margin-left: 1rem; margin-right: 15px; border-color: rgba(255,255,255,0.2); }
         .toggle-3d.active { background: rgba(0,243,255,0.15); border-color: var(--accent-cyan); color: var(--accent-cyan); box-shadow: 0 0 10px rgba(0,243,255,0.3); }
@@ -962,10 +1214,19 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
         .victim-popup-overlay {
           position: fixed; top: 0; left: 0; right: 0; bottom: 0;
           background: transparent;
-          display: flex; align-items: flex-end; justify-content: flex-end; 
+          display: flex; align-items: flex-end; justify-content: flex-end;
           z-index: 1000;
           pointer-events: none;
           padding: 2rem;
+        }
+        /* Separate overlay for assumptions modal — needs pointer-events so clicks register */
+        .assumptions-overlay {
+          position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+          background: rgba(0, 0, 0, 0.65);
+          backdrop-filter: blur(4px);
+          display: flex; align-items: center; justify-content: center;
+          z-index: 1100;
+          pointer-events: auto;
         }
         .victim-popup {
           width: 420px; padding: 0; 
@@ -1015,6 +1276,133 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
         .gap-2 { gap: 0.5rem; }
         .full-w { width: 100%; }
         .mt-4 { margin-top: 1rem; }
+
+        /* ── Info button ── */
+        .cyber-button.info-btn {
+          background: rgba(165, 243, 252, 0.08);
+          border-color: rgba(165, 243, 252, 0.35);
+          color: #a5f3fc;
+          display: flex; align-items: center; gap: 6px;
+        }
+        .cyber-button.info-btn:hover {
+          background: rgba(165, 243, 252, 0.16);
+          border-color: #a5f3fc;
+        }
+
+        /* ── Assumptions Modal ── */
+        .assumptions-modal {
+          width: min(860px, 95vw);
+          max-height: 85vh;
+          display: flex;
+          flex-direction: column;
+          border-radius: 12px;
+          border: 1px solid rgba(165, 243, 252, 0.25);
+          overflow: hidden;
+        }
+        .assumptions-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          padding: 1.2rem 1.5rem;
+          border-bottom: 1px solid rgba(165, 243, 252, 0.12);
+          flex-shrink: 0;
+        }
+        .close-btn {
+          background: none; border: 1px solid rgba(255,255,255,0.15);
+          border-radius: 6px; color: var(--text-muted);
+          width: 32px; height: 32px;
+          display: flex; align-items: center; justify-content: center;
+          cursor: pointer;
+        }
+        .close-btn:hover { border-color: rgba(255,255,255,0.4); color: #fff; }
+        .assumptions-body {
+          overflow-y: auto;
+          padding: 1.25rem 1.5rem;
+          display: flex;
+          flex-direction: column;
+          gap: 1.5rem;
+        }
+        .assump-section-title {
+          font-family: 'Orbitron', sans-serif;
+          font-size: 0.72rem;
+          color: #a5f3fc;
+          letter-spacing: 0.1em;
+          text-transform: uppercase;
+          margin-bottom: 0.75rem;
+          padding-bottom: 0.4rem;
+          border-bottom: 1px solid rgba(165, 243, 252, 0.1);
+        }
+        .assump-table {
+          width: 100%;
+          border-collapse: collapse;
+          font-size: 0.8rem;
+        }
+        .assump-table th {
+          text-align: left;
+          padding: 6px 10px;
+          font-size: 0.68rem;
+          color: var(--text-muted);
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          border-bottom: 1px solid rgba(255,255,255,0.08);
+        }
+        .assump-table td {
+          padding: 8px 10px;
+          border-bottom: 1px solid rgba(255,255,255,0.04);
+          color: var(--text-primary);
+          vertical-align: middle;
+        }
+        .assump-table tr:last-child td { border-bottom: none; }
+        .assump-table tr:hover td { background: rgba(255,255,255,0.03); }
+        .terrain-badge {
+          display: inline-block;
+          padding: 2px 8px;
+          border-radius: 4px;
+          font-size: 0.72rem;
+          font-family: 'Orbitron', sans-serif;
+          letter-spacing: 0.06em;
+        }
+        .terrain-badge.city { background: rgba(138,138,122,0.35); color: #d0d0b8; border: 1px solid rgba(180,180,160,0.4); }
+        .terrain-badge.forest { background: rgba(42,92,53,0.45); color: #7dce8a; border: 1px solid rgba(60,140,70,0.45); }
+        .terrain-badge.flat { background: rgba(75,107,79,0.35); color: #a0c8a4; border: 1px solid rgba(100,150,100,0.35); }
+        .terrain-badge.lake { background: rgba(53,95,139,0.45); color: #7ab8e8; border: 1px solid rgba(80,140,200,0.45); }
+        .pri-badge {
+          display: inline-block;
+          padding: 2px 8px;
+          border-radius: 4px;
+          font-size: 0.72rem;
+          font-family: 'Orbitron', sans-serif;
+        }
+        .pri-badge.high { background: rgba(255,61,61,0.18); color: #ff9090; border: 1px solid rgba(255,61,61,0.4); }
+        .pri-badge.medium { background: rgba(255,179,0,0.18); color: #ffcc66; border: 1px solid rgba(255,179,0,0.4); }
+        .pri-badge.low { background: rgba(100,100,100,0.2); color: #aaa; border: 1px solid rgba(150,150,150,0.3); }
+        .swatch {
+          width: 20px; height: 20px;
+          border-radius: 4px;
+          border: 1px solid rgba(255,255,255,0.15);
+        }
+        .assump-kv-grid {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 4px 16px;
+        }
+        .kv-row {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          font-size: 0.8rem;
+          padding: 6px 10px;
+          border-radius: 4px;
+          background: rgba(255,255,255,0.02);
+          border: 1px solid rgba(255,255,255,0.05);
+        }
+        .kv-row span:first-child { color: var(--text-muted); }
+        .kv-val { font-family: 'Courier New', monospace; font-size: 0.78rem; color: #dff9ff; }
+        .highlight { color: #ffd700 !important; font-weight: bold; }
+        .warn-text { color: #ffb300 !important; }
+        .ok { color: var(--accent-success) !important; }
+        .err { color: var(--accent-red, #ff3d3d) !important; }
+        .muted { color: var(--text-muted) !important; opacity: 0.6; }
       `}</style>
     </div>
   );

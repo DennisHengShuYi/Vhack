@@ -83,28 +83,111 @@ class DisasterZone(BaseModel):
             self.scanned_cells = [[False] * self.width for _ in range(self.height)]
         if not self.hazard_cells:
             self.hazard_cells = [[False] * self.width for _ in range(self.height)]
-            for _ in range(20):
-                hx, hy = random.randint(1, self.width - 2), random.randint(1, self.height - 2)
-                self.hazard_cells[hy][hx] = True
 
         if not self.terrain_types:
             self.terrain_types = [['flat'] * self.width for _ in range(self.height)]
-            for _ in range(12):
-                mx, my = random.randint(2, self.width - 3), random.randint(2, self.height - 3)
-                self.terrain_types[my][mx] = 'mountain'
-            for _ in range(8):
-                lx, ly = random.randint(1, self.width - 2), random.randint(1, self.height - 2)
-                self.terrain_types[ly][lx] = 'lake'
+
+            # BFS-grow a connected region of `label` from a seed point
+            def grow_blob(sx: int, sy: int, label: str, target: int):
+                if self.terrain_types[sy][sx] != 'flat':
+                    return
+                self.terrain_types[sy][sx] = label
+                frontier = [(sx, sy)]
+                count = 1
+                dirs = [(0,1),(0,-1),(1,0),(-1,0),(1,1),(1,-1),(-1,1),(-1,-1)]
+                while count < target and frontier:
+                    idx = random.randint(0, len(frontier) - 1)
+                    ox, oy = frontier[idx]
+                    random.shuffle(dirs)
+                    grew = False
+                    for dx, dy in dirs:
+                        nx2, ny2 = ox + dx, oy + dy
+                        if (1 <= nx2 < self.width - 1 and 1 <= ny2 < self.height - 1
+                                and self.terrain_types[ny2][nx2] == 'flat'):
+                            self.terrain_types[ny2][nx2] = label
+                            frontier.append((nx2, ny2))
+                            count += 1
+                            grew = True
+                            if count >= target:
+                                return
+                            break
+                    if not grew:
+                        frontier.pop(idx)
+
+            # ── 1. City: one large urban district (rectangle core + L-arm extension) ──
+            # Core block: 8–12 wide × 5–8 tall  (~40–96 cells)
+            cw = random.randint(8, 12)
+            ch = random.randint(5, 8)
+            cx0 = random.randint(1, self.width  - cw - 1)
+            cy0 = random.randint(1, self.height - ch - 1)
+            for gy in range(cy0, cy0 + ch):
+                for gx in range(cx0, cx0 + cw):
+                    self.terrain_types[gy][gx] = 'city'
+            # Extension arm (L or T shape adds 10–25 more city cells)
+            arm_w = random.randint(3, 5)
+            arm_h = random.randint(3, 5)
+            side = random.choice(['right', 'bottom', 'left', 'top'])
+            if side == 'right' and cx0 + cw + arm_w < self.width - 1:
+                ax = cx0 + cw
+                ay = cy0 + random.randint(0, max(0, ch - arm_h))
+                for gy in range(ay, min(ay + arm_h, self.height - 1)):
+                    for gx in range(ax, min(ax + arm_w, self.width - 1)):
+                        self.terrain_types[gy][gx] = 'city'
+            elif side == 'bottom' and cy0 + ch + arm_h < self.height - 1:
+                ax = cx0 + random.randint(0, max(0, cw - arm_w))
+                ay = cy0 + ch
+                for gy in range(ay, min(ay + arm_h, self.height - 1)):
+                    for gx in range(ax, min(ax + arm_w, self.width - 1)):
+                        self.terrain_types[gy][gx] = 'city'
+            elif side == 'left' and cx0 - arm_w >= 1:
+                ax = cx0 - arm_w
+                ay = cy0 + random.randint(0, max(0, ch - arm_h))
+                for gy in range(ay, min(ay + arm_h, self.height - 1)):
+                    for gx in range(ax, ax + arm_w):
+                        self.terrain_types[gy][gx] = 'city'
+            elif side == 'top' and cy0 - arm_h >= 1:
+                ax = cx0 + random.randint(0, max(0, cw - arm_w))
+                ay = cy0 - arm_h
+                for gy in range(ay, ay + arm_h):
+                    for gx in range(ax, min(ax + arm_w, self.width - 1)):
+                        self.terrain_types[gy][gx] = 'city'
+
+            # ── 2. Forest: 1–2 large contiguous woodland patches (BFS-grown) ──
+            for _ in range(random.randint(1, 2)):
+                fsize = random.randint(25, 35)
+                for _attempt in range(40):
+                    fx = random.randint(1, self.width - 2)
+                    fy = random.randint(1, self.height - 2)
+                    if self.terrain_types[fy][fx] == 'flat':
+                        grow_blob(fx, fy, 'forest', fsize)
+                        break
+
+            # ── 3. Lake: one connected water body (compact organic blob) ──
+            for _attempt in range(40):
+                lx = random.randint(2, self.width - 3)
+                ly = random.randint(2, self.height - 3)
+                if self.terrain_types[ly][lx] == 'flat':
+                    grow_blob(lx, ly, 'lake', random.randint(10, 18))
+                    break
+
+            # ── 4. Keep base-station corner (0,0) accessible ──
+            self.terrain_types[0][0] = 'flat'
+
+            # ── 5. Lake cells are impassable ──
+            for y in range(self.height):
+                for x in range(self.width):
+                    if self.terrain_types[y][x] == 'lake':
+                        self.hazard_cells[y][x] = True
 
         if not self.zones:
             # 12 zones: 4 columns × 3 rows of 5×5 cells each
             self.zones = {
-                "Z0":  Zone(id="Z0",  sx=0,  sy=0,  ex=4,  ey=4,  priority="HIGH"),
+                "Z0":  Zone(id="Z0",  sx=0,  sy=0,  ex=4,  ey=4),
                 "Z1":  Zone(id="Z1",  sx=5,  sy=0,  ex=9,  ey=4),
                 "Z2":  Zone(id="Z2",  sx=10, sy=0,  ex=14, ey=4),
                 "Z3":  Zone(id="Z3",  sx=15, sy=0,  ex=19, ey=4),
                 "Z4":  Zone(id="Z4",  sx=0,  sy=5,  ex=4,  ey=9),
-                "Z5":  Zone(id="Z5",  sx=5,  sy=5,  ex=9,  ey=9,  priority="HIGH"),
+                "Z5":  Zone(id="Z5",  sx=5,  sy=5,  ex=9,  ey=9),
                 "Z6":  Zone(id="Z6",  sx=10, sy=5,  ex=14, ey=9),
                 "Z7":  Zone(id="Z7",  sx=15, sy=5,  ex=19, ey=9),
                 "Z8":  Zone(id="Z8",  sx=0,  sy=10, ex=4,  ey=14),
@@ -112,6 +195,19 @@ class DisasterZone(BaseModel):
                 "Z10": Zone(id="Z10", sx=10, sy=10, ex=14, ey=14),
                 "Z11": Zone(id="Z11", sx=15, sy=10, ex=19, ey=14),
             }
+            # Compute priority dynamically from city cell count
+            for zid, z in self.zones.items():
+                city_count = sum(
+                    1 for cy in range(z.sy, z.ey + 1)
+                    for cx in range(z.sx, z.ex + 1)
+                    if self.terrain_types[cy][cx] == 'city'
+                )
+                if city_count >= 4:
+                    z.priority = "HIGH"
+                elif city_count >= 1:
+                    z.priority = "MEDIUM"
+                else:
+                    z.priority = "LOW"
 
         if not self.survivors:
             num = self.num_victims if self.num_victims > 0 else random.randint(10, 15)
@@ -125,14 +221,26 @@ class DisasterZone(BaseModel):
                 "SOS signal — weak thermal signature",
                 "Survivor with broken leg near wall",
             ]
+            TERRAIN_WEIGHTS = {'city': 5, 'forest': 2, 'flat': 1, 'lake': 0}
+
+            # Build candidate pool weighted by terrain
+            pool = []
+            for sy in range(self.height):
+                for sx in range(self.width):
+                    w = TERRAIN_WEIGHTS.get(self.terrain_types[sy][sx], 1)
+                    pool.extend([(sx, sy)] * w)
+
+            random.shuffle(pool)
             placed = set()
-            for i in range(num):
-                while True:
-                    sx = random.randint(1, self.width - 1)
-                    sy = random.randint(1, self.height - 1)
-                    if (sx, sy) not in placed:
-                        placed.add((sx, sy))
-                        break
+            seen_in_pool: list = []
+            for coord in pool:
+                if coord not in placed and self.terrain_types[coord[1]][coord[0]] != 'lake':
+                    seen_in_pool.append(coord)
+                    placed.add(coord)
+                if len(placed) >= num:
+                    break
+
+            for i, (sx, sy) in enumerate(seen_in_pool[:num]):
                 self.survivors.append({
                     "x": sx, "y": sy,
                     "report": random.choice(reports),
@@ -205,7 +313,7 @@ class SimulationState:
 
     def _distance_to_home(self, drone: Drone) -> int:
         bx, by = self.base_station
-        return abs(drone.x - bx) + abs(drone.y - by)
+        return chebyshev(drone.x, drone.y, bx, by)
 
     def minimum_battery_to_return(self, drone: Drone) -> float:
         return (self._distance_to_home(drone) * BATTERY_DRAIN_MOVE) + BATTERY_RETURN_RESERVE
@@ -213,9 +321,7 @@ class SimulationState:
     def should_return_to_base(self, drone: Drone) -> bool:
         if drone.is_charging:
             return False
-        low_threshold = drone.battery < LOW_BATTERY_THRESHOLD
-        cannot_safely_return_later = drone.battery <= self.minimum_battery_to_return(drone)
-        return low_threshold or cannot_safely_return_later
+        return drone.battery <= self.minimum_battery_to_return(drone)
 
     def get_available_zones(self) -> List[Dict[str, Any]]:
         available = []

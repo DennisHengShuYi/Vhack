@@ -31,43 +31,52 @@ SYSTEM_PROMPT = """You are SENTINEL — the Strategic AI Commander of a 5-drone 
 === OPERATIONAL ZONE ===
 Disaster grid: 20×15. Twelve search sectors (4 columns × 3 rows, each 5×5 cells):
 
-  ROW 0 (y 0–4):
-    Z0  (NW):   x[0-4],  y[0-4]   → Primary: ALPHA-1  [HIGH PRIORITY]
-    Z1  (N):    x[5-9],  y[0-4]   → Primary: ALPHA-2
-    Z2  (NE):   x[10-14],y[0-4]   → Primary: ALPHA-3
-    Z3  (NE2):  x[15-19],y[0-4]   → Primary: ALPHA-4
+  ROW 0 (y 0–4):   Z0 (NW), Z1 (N), Z2 (NE), Z3 (NE2)
+  ROW 1 (y 5–9):   Z4 (W),  Z5 (C), Z6 (CE), Z7 (E)
+  ROW 2 (y 10–14): Z8 (SW), Z9 (S), Z10 (SE), Z11 (SE2)
 
-  ROW 1 (y 5–9):
-    Z4  (W):    x[0-4],  y[5-9]   → Primary: ALPHA-5
-    Z5  (C):    x[5-9],  y[5-9]   [HIGH PRIORITY]
-    Z6  (CE):   x[10-14],y[5-9]
-    Z7  (E):    x[15-19],y[5-9]
+Zone priorities are computed dynamically from terrain — HIGH means many city cells detected.
 
-  ROW 2 (y 10–14):
-    Z8  (SW):   x[0-4],  y[10-14]
-    Z9  (S):    x[5-9],  y[10-14]
-    Z10 (SE):   x[10-14],y[10-14]
-    Z11 (SE2):  x[15-19],y[10-14]
-
-  ALPHA-5: Support drone — covers the zone needing help most, or any zone not yet claimed.
+=== TERRAIN TYPES ===
+- CITY cells: Dense population — highest survivor probability. Zones with City terrain are HIGH priority.
+- FOREST cells: Hikers/campers — moderate survivor probability. Slightly higher battery cost to traverse.
+- FLAT cells: Open ground — low baseline probability.
+- LAKE cells: Water — no survivors, impassable (drones route around them).
+The Terrain=[...] field in each option shows cell counts per type — use this to prioritise zones with more City cells when distances are similar.
 
 === YOUR MANDATE ===
-1. ANALYZE: For each idle drone in the options menu, evaluate battery, position, and risk.
-2. PRIORITIZE: Assign HIGH-priority zones first. Battery < 25% always means return_to_base().
-3. REASONING: Write a concise Mission Log BEFORE calling any tools:
-   - Assess each drone's battery and position.
-   - State which zone/action you chose and why.
-   - If RISK=HIGH, prefer caution — recall unless the zone is HIGH priority.
-4. EXECUTE: Call assign_scan_zone() or return_to_base() for ALL idle drones in the menu.
+For EVERY idle drone, output EXACTLY this analysis block BEFORE any tool calls:
+
+  DRONE [id] @ (x,y) | Battery: B%
+    TRADEOFF: [1 sentence comparing the top 2 options — proximity vs priority]
+    DECISION → [zone_id]: [reason in ≤15 words]
+
+Then execute ALL assignments in one batch of tool calls.
+Never call assign_scan_zone() before writing the analysis block for that drone.
+If "Battery too low" → write DECISION → RTB: battery insufficient, then call return_to_base().
+
+After all analysis blocks, write one mission-level note:
+  MISSION PULSE: [1 sentence on coverage pace or any zone needing urgent attention]
 
 === STRATEGIC RULES ===
 - Never leave an idle drone without an assignment.
-- Assign drones to DIFFERENT zones whenever possible (12 zones available).
-- Prioritize HIGH PRIORITY zones (Z0, Z5) first.
+- Assign drones to DIFFERENT zones whenever possible (avoid overlap).
+- Never assign a zone already listed as IN_PROGRESS — another drone is scanning it.
+- Opt 1 (nearest) is usually best unless Opt 2/3 is HIGH priority AND transit difference is ≤ 5 cells.
+- Prefer [PARTIAL-resume] zones — they have saved scan progress and will complete faster.
 - ALPHA-5 assists the most-needed zone or covers zones another drone abandoned.
-- If all zones are claimed, send idle drones to return_to_base().
+- If all zones are claimed or no valid option, send idle drones to return_to_base().
 
 Write your Mission Log clearly so the human observer can follow your logic, then execute all assignments.
+
+=== MISSION START PROTOCOL ===
+When you see "MISSION START — STRATEGIC BRIEFING REQUIRED":
+1. Review the terrain analysis already logged (shows zone priorities from city/forest/lake counts).
+2. Write a concise Mission Plan BEFORE calling any tools:
+   - List which HIGH-priority zones you will target first and which drones you'll send.
+   - Note any LOW-priority zones you'll assign only after high-value zones are covered.
+3. Then execute all assignments in one pass.
+This briefing runs only once at mission start. Subsequent rounds follow the normal mandate.
 """
 
 
@@ -98,6 +107,7 @@ class AgentOrchestrator:
     def __init__(self, server_script_path: str):
         self.server_script_path = server_script_path
         self.backend_url = "http://127.0.0.1:8000"
+        self.mission_memory: list[str] = []  # Rolling log of key mission events
 
         openai_key = os.getenv("OPENAI_API_KEY")
         gemini_key = os.getenv("GEMINI_API_KEY")
@@ -161,6 +171,27 @@ class AgentOrchestrator:
                 current_drone = None
         return actions
 
+    def _extract_memory_events(self, messages: list, tick: int) -> list[str]:
+        """Parses tool results after each tick and extracts key mission events."""
+        events = []
+        for m in messages:
+            if m.type == "tool":
+                content = str(m.content)
+                if "survivor" in content.lower() and ("found" in content.lower() or "detected" in content.lower()):
+                    events.append(f"Tick {tick}: Survivor detected — {content[:80]}")
+                if "complete" in content.lower() and "zone" in content.lower():
+                    events.append(f"Tick {tick}: Zone completed — {content[:60]}")
+                if "low battery" in content.lower() or "rtb" in content.lower():
+                    events.append(f"Tick {tick}: Battery RTB triggered — {content[:60]}")
+        return events
+
+    def _is_trivial(self, poll_text: str) -> bool:
+        """Returns True if every idle drone has exactly 1 valid option or must RTB — no tradeoff."""
+        drones_mentioned = poll_text.count("[DRONE:")
+        opt1_count = poll_text.count("Opt 1:")
+        rtb_count = poll_text.count("Battery too low for any zone")
+        return (opt1_count + rtb_count) == drones_mentioned and "Opt 2:" not in poll_text
+
     async def run_mission_loop(self):
         """Connects to the MCP server and runs the autonomous mission loop."""
         print("Starting SENTINEL Agent Orchestrator...", file=sys.stderr)
@@ -200,7 +231,7 @@ class AgentOrchestrator:
                             continue
 
                         if "NO_IDLE_DRONES" in poll_text:
-                            await asyncio.sleep(1.0)
+                            await asyncio.sleep(0.5)
                             continue
 
                         print(f"\n--- SENTINEL Tick {tick} ---", file=sys.stderr)
@@ -211,11 +242,24 @@ class AgentOrchestrator:
                             await asyncio.sleep(5.0)
                             continue
 
+                        # Reset memory on mission start
+                        if "MISSION START" in poll_text:
+                            self.mission_memory = []
+
                         # ── PHASE 2: EXECUTE (LLM or rule-based) ────────────
-                        if self.llm_active and agent_executor is not None:
+                        is_trivial = self._is_trivial(poll_text)
+
+                        if self.llm_active and agent_executor is not None and not is_trivial:
+                            # Build memory block for injection
+                            memory_block = ""
+                            if self.mission_memory:
+                                memory_block = "\n\n=== MISSION MEMORY (recent key events) ===\n"
+                                memory_block += "\n".join(f"  • {e}" for e in self.mission_memory[-8:])
+                                memory_block += "\n=== END MEMORY ===\n"
+
                             messages = [
                                 SystemMessage(content=SYSTEM_PROMPT),
-                                HumanMessage(content=f"Execute assignments for these idle drones:\n\n{poll_text}")
+                                HumanMessage(content=f"{memory_block}Execute assignments for these idle drones:\n\n{poll_text}")
                             ]
                             try:
                                 async for state in agent_executor.astream(
@@ -232,6 +276,10 @@ class AgentOrchestrator:
                                         print(f"  [RES] {latest_msg.content[:80]}", file=sys.stderr)
                                         await self._broadcast_log(http_session, f"[SYSTEM] {latest_msg.content}")
 
+                                # Extract and store memory events from this tick
+                                new_events = self._extract_memory_events(messages, tick)
+                                self.mission_memory.extend(new_events)
+
                             except asyncio.TimeoutError:
                                 await self._broadcast_log(http_session, "⏱️ LLM timeout — rule-based fallback.")
                                 await self._execute_rule_based(session, poll_text)
@@ -239,8 +287,11 @@ class AgentOrchestrator:
                                 print(f"  [ERROR] {e}", file=sys.stderr)
                                 await self._broadcast_log(http_session, f"[ERROR] {e}")
                         else:
-                            # Rule-based fallback — no LLM
+                            # Rule-based fallback — no LLM, or trivial tick
                             actions = self._rule_based_assignments(poll_text)
+                            if is_trivial and self.llm_active:
+                                await self._broadcast_log(http_session,
+                                    "[AUTO] No tradeoff — single valid option per drone, rule-based assignment used")
                             for action in actions:
                                 try:
                                     if action[0] == "assign":
