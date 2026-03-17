@@ -51,11 +51,14 @@ Disaster grid: 20×15. Twelve search sectors (4 columns × 3 rows, each 5×5 cel
 
   ALPHA-5: Support drone — covers the zone needing help most, or any zone not yet claimed.
 
-=== YOUR MANDATE ===
-1. ANALYZE: For each idle drone in the options menu, evaluate battery, position, and risk.
-2. PRIORITIZE: Assign HIGH-priority zones first. Battery < 25% always means return_to_base().
-3. REASONING: Write a concise Mission Log BEFORE calling any tools:
+=== STRATEGIC COMMAND RULES ===
+1. FREE AGENT MODEL: When a drone finishes a voice diversion, it is NOT recalled. It stays in the field at its current location. Assign it to the NEAREST unscanned zone to minimize travel.
+2. RESIDUAL HANDOFFS: When a drone is diverted, its old zone is marked 'RESIDUAL HANDOFF'. These are high-priority as they are partially finished. Always check if an idle drone is closer to a handoff point than the original drone.
+3. 3x3 TACTICAL EXPANSION: Voice commands automatically trigger a box scan. You don't need to manually command expansion.
+4. PRIORITIZE: Assign HIGH-priority zones first. Battery < 25% always means return_to_base().
+5. REASONING: Write a concise Mission Log BEFORE calling any tools:
    - Assess each drone's battery and position.
+   - Look for 'RESIDUAL HANDOFF' zones to resume.
    - State which zone/action you chose and why.
    - If RISK=HIGH, prefer caution — recall unless the zone is HIGH priority.
 4. EXECUTE: Call assign_scan_zone() or return_to_base() for ALL idle drones in the menu.
@@ -161,6 +164,7 @@ class AgentOrchestrator:
                 current_drone = None
         return actions
 
+
     async def run_mission_loop(self):
         """Connects to the MCP server and runs the autonomous mission loop."""
         print("Starting SENTINEL Agent Orchestrator...", file=sys.stderr)
@@ -237,7 +241,7 @@ class AgentOrchestrator:
                                 await self._execute_rule_based(session, poll_text)
                             except Exception as e:
                                 print(f"  [ERROR] {e}", file=sys.stderr)
-                                await self._broadcast_log(http_session, f"[ERROR] {e}")
+                                await self._broadcast_log(http_session, f"❌ **SYSTEM ERROR**: {type(e).__name__}: {e}")
                         else:
                             # Rule-based fallback — no LLM
                             actions = self._rule_based_assignments(poll_text)

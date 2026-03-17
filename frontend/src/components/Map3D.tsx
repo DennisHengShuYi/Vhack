@@ -103,9 +103,7 @@ export default function Map3D({ zone, drones, baseX, baseY, showRtbOnly }: Props
           const scanned = zone.scanned_cells[y][x];
           const hazard = zone.hazard_cells[y][x];
           const survivorAtPos = zone.survivors.find((s) => s.x === x && s.y === y);
-          const isVictimFound = !!survivorAtPos?.found;
           const isVictimRescued = !!survivorAtPos?.rescued;
-          const isVictimHidden = survivorAtPos && !isVictimFound && !isVictimRescued;
 
           const { wx, wz } = toWorld(x, y);
           const h = terrainHeight(x, y, terrain);

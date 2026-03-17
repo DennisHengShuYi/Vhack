@@ -173,6 +173,7 @@ class SimulationState:
         self.total_victims_found = 0
         self.total_rescued = 0
         self._log_id = 0
+        self.pending_intel: List[Dict] = []
 
     def _sample_unique_points(self, count: int) -> List[tuple]:
         cells = [(x, y) for y in range(GRID_H) for x in range(GRID_W)]
@@ -217,17 +218,36 @@ class SimulationState:
         cannot_safely_return_later = drone.battery <= self.minimum_battery_to_return(drone)
         return low_threshold or cannot_safely_return_later
 
+    def is_zone_fully_scanned(self, zone_id: str) -> bool:
+        zone = self.zone.zones.get(zone_id)
+        if not zone: return True
+        for y in range(zone.sy, zone.ey + 1):
+            for x in range(zone.sx, zone.ex + 1):
+                if not self.zone.scanned_cells[y][x]:
+                    return False
+        return True
+    
     def get_available_zones(self) -> List[Dict[str, Any]]:
         available = []
         for zid, z in self.zone.zones.items():
             if z.status == ZoneStatus.UNSCANNED:
-                area = (z.ex - z.sx + 1) * (z.ey - z.sy + 1)
+                # Optimized cost: use residual path length if it exists, else full area
+                cost = len(z.residual_path) if z.residual_path else (z.ex - z.sx + 1) * (z.ey - z.sy + 1)
+                
+                # Optimized transit: if it is a residual handoff, fly to where the last drone left off
+                tsx, tsy = z.sx, z.sy
+                label_suffix = ""
+                if z.residual_path and len(z.residual_path) > 0:
+                    tsx, tsy = z.residual_path[0]
+                    label_suffix = " (RESIDUAL HANDOFF)"
+
                 available.append({
-                    "zone_id": zid,
-                    "sx": z.sx, "sy": z.sy,
+                    "zone_id": zid + label_suffix,
+                    "sx": tsx, "sy": tsy,
                     "ex": z.ex, "ey": z.ey,
-                    "scan_cost": area,
-                    "priority": z.priority
+                    "scan_cost": cost,
+                    "priority": z.priority,
+                    "real_zid": zid
                 })
         return available
 
@@ -254,12 +274,7 @@ class SimulationState:
         if not drone or not zone:
             return {"error": "Drone or Zone not found"}
 
-        drone.assigned_zone_id = zone_id
-        drone.path_queue = []
-        drone.status = "ON_MISSION"
-        drone.status_label = f"SCANNING {zone_id}"
-        drone.scanned_grids = 0
-
+        temp_path = []
         start_x, start_y, end_x, end_y = zone.sx, zone.sy, zone.ex, zone.ey
 
         if zone.residual_path:
@@ -281,21 +296,19 @@ class SimulationState:
             target_sx, target_sy = best_corner
 
         curr_x, curr_y = drone.x, drone.y
-
         if (curr_x, curr_y) == (target_sx, target_sy):
-            drone.path_queue.append([curr_x, curr_y])
+            temp_path.append([curr_x, curr_y])
 
         while (curr_x, curr_y) != (target_sx, target_sy):
             if curr_x < target_sx: curr_x += 1
             elif curr_x > target_sx: curr_x -= 1
             if curr_y < target_sy: curr_y += 1
             elif curr_y > target_sy: curr_y -= 1
-            drone.path_queue.append([curr_x, curr_y])
+            temp_path.append([curr_x, curr_y])
 
         if zone.residual_path and len(zone.residual_path) > 0:
-            # First point is already in path_queue due to the transit logic above
             for i in range(1, len(zone.residual_path)):
-                drone.path_queue.append(zone.residual_path[i])
+                temp_path.append(zone.residual_path[i])
             zone.residual_path = []
         else:
             rev_x = (target_sx == end_x)
@@ -304,14 +317,45 @@ class SimulationState:
             if rev_y:
                 y_range = range(end_y, start_y - 1, -1)
  
+            # --- NEW: Strategic Priority Scanning ---
+            # Separate cells by priority (Flat first, Terrain/Hazards last)
+            flat_priority = []
+            low_priority = []
+
             for i, y in enumerate(y_range):
                 if i % 2 == 0:
                     xs = range(end_x, start_x - 1, -1) if rev_x else range(start_x, end_x + 1)
                 else:
                     xs = range(start_x, end_x + 1) if rev_x else range(end_x, start_x - 1, -1)
                 for x in xs:
-                    if not drone.path_queue or drone.path_queue[-1] != [x, y]:
-                        drone.path_queue.append([x, y])
+                    terrain = self.zone.terrain_types[y][x]
+                    is_hazard = self.zone.hazard_cells[y][x]
+                    # Anything not 'flat' or marked as a 'hazard' gets pushed to the end of the queue
+                    if terrain == 'flat' and not is_hazard:
+                        flat_priority.append([x, y])
+                    else:
+                        low_priority.append([x, y])
+            
+            # Assemble: Transit -> Flat Surface Scan -> Tactical Environment Scan (Mountains/Lakes/Hazards)
+            for cell in flat_priority:
+                if not temp_path or temp_path[-1] != cell:
+                    temp_path.append(cell)
+            for cell in low_priority:
+                if not temp_path or temp_path[-1] != cell:
+                    temp_path.append(cell)
+
+        # ATOMIC ASSIGNMENT: Update state at the very end to prevent Loop A race conditions
+        drone.assigned_zone_id = zone_id
+        drone.path_queue = temp_path
+        drone.status = "ON_MISSION"
+        drone.status_label = f"SCANNING {zone_id}"
+        drone.scanned_grids = 0
+        drone.returning_to_base = False
+        drone.is_charging = False
+        drone.is_waiting_response = False
+        drone.mission_complete_rtb = False
+        drone.target_x = None
+        drone.target_y = None
 
         return {
             "success": True,
