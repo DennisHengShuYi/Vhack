@@ -135,7 +135,7 @@ export default function App() {
 
   return (
     <div className="app-container">
-      <DashboardHeader 
+      <DashboardHeader
         connectionStatus={connectionStatus}
         stats={stats}
         victimCount={victimCount}
@@ -149,7 +149,7 @@ export default function App() {
       />
 
       <main className="main-content">
-        <FleetStatus 
+        <FleetStatus
           drones={drones}
           activeDroneId={activeDroneId}
           setActiveDroneId={setActiveDroneId}
@@ -158,7 +158,7 @@ export default function App() {
           lowBatteryPct={LOW_BATTERY_PCT}
         />
 
-        <GridMap 
+        <GridMap
           is3DView={is3DView}
           zone={zone}
           drones={drones || []}
@@ -171,7 +171,7 @@ export default function App() {
           Map3D={Map3D}
         />
 
-        <ReasoningLog 
+        <ReasoningLog
           log={log}
           logFilter={logFilter}
           setLogFilter={setLogFilter}
@@ -179,7 +179,7 @@ export default function App() {
         />
       </main>
 
-      <VictimPopup 
+      <VictimPopup
         waitingDrone={waitingDrone}
         isRecording={isRecording}
         transcription={transcription}

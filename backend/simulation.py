@@ -8,6 +8,7 @@ import math
 from enum import Enum
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
+from drone import DroneStatus
 
 # ─── Grid Constants ────────────────────────────────────────────────────────────
 GRID_W               = 20
@@ -44,12 +45,14 @@ class Drone(BaseModel):
     y: int = 0
     base_x: int = 0
     base_y: int = 0
-    battery: float = 100.0
+    battery: float = 0.0
     is_charging: bool = False
     is_waiting_response: bool = False
     returning_to_base: bool = False
     mission_complete_rtb: bool = False
-    status: str = "IDLE"
+    status: DroneStatus = DroneStatus.IDLE
+    is_connected: bool = False
+    has_pinged: bool = False
     target_x: Optional[int] = None
     target_y: Optional[int] = None
     victim_report: Optional[str] = None
@@ -164,8 +167,10 @@ class SimulationState:
                 y=start_y,
                 base_x=base_x,
                 base_y=base_y,
-                status="IDLE",
-                status_label="STANDBY",
+                status=DroneStatus.IDLE,
+                status_label="UNAVAILABLE",
+                is_connected=False,
+                has_pinged=False,
             )
         self.mission_log: List[Dict] = []
         self.mission_active = False
@@ -174,6 +179,29 @@ class SimulationState:
         self.total_rescued = 0
         self._log_id = 0
         self.pending_intel: List[Dict] = []
+
+    def simulate_heartbeats(self):
+        """Randomly simulation of receiving discovery heartbeats from drones."""
+        for d_id, drone in self.drones.items():
+            if not drone.is_connected:
+                # 20% chance to establish/restore link
+                if random.random() < 0.20:
+                    if not drone.has_pinged:
+                        # First time initialization
+                        drone.has_pinged = True
+                        drone.battery = random.uniform(35.0, 100.0)
+                        self.log(f"🔋 [INIT] {d_id} established first link. Battery: {drone.battery:.0f}%", "INFO", d_id)
+                    else:
+                        self.log(f"📡 [RESTORED] {d_id} reconnected to mesh network.", "SUCCESS", d_id)
+                    
+                    drone.is_connected = True
+                    if drone.battery < LOW_BATTERY_THRESHOLD:
+                        drone.status_label = "NEEDS CHARGE"
+                    else:
+                        drone.status_label = "AWAITING ORDERS"
+                else:
+                    drone.status_label = "UNAVAILABLE"
+                    drone.status = DroneStatus.IDLE
 
     def _sample_unique_points(self, count: int) -> List[tuple]:
         cells = [(x, y) for y in range(GRID_H) for x in range(GRID_W)]

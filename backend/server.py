@@ -48,6 +48,7 @@ async def run_simulation_loop():
     while True:
         sim = shared.sim
         if sim.mission_active:
+            sim.simulate_heartbeats()
             base_x, base_y = sim.base_station
 
             # Mission completion check
@@ -87,6 +88,10 @@ async def run_simulation_loop():
                 for d_id, drone in list(sim.drones.items()):
                     try:
                         drone.base_x, drone.base_y = base_x, base_y
+
+                        # Skip logic if drone is not connected (Detection realism)
+                        if not drone.is_connected:
+                            continue
 
                         # Victim standby — drone waits for operator
                         if drone.is_waiting_response:

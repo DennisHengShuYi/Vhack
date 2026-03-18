@@ -241,7 +241,8 @@ class AgentOrchestrator:
                                 await self._execute_rule_based(session, poll_text)
                             except Exception as e:
                                 print(f"  [ERROR] {e}", file=sys.stderr)
-                                await self._broadcast_log(http_session, f"❌ **SYSTEM ERROR**: {type(e).__name__}: {e}")
+                                await self._broadcast_log(http_session, f"⚠️ LLM Error: {e} — triggering rule-based fallback.")
+                                await self._execute_rule_based(session, poll_text)
                         else:
                             # Rule-based fallback — no LLM
                             actions = self._rule_based_assignments(poll_text)
