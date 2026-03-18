@@ -148,25 +148,40 @@ async def run_simulation_loop():
                         # Movement: use path_queue if available, else step toward target_x/y
                         tx, ty = drone.x, drone.y
                         if drone.path_queue:
-                            # Safe pop to avoid race conditions with agent thread
-                            if len(drone.path_queue) > 0:
-                                nx, ny = drone.path_queue.pop(0)
-                                tx, ty = nx, ny
+                            # If we are at the next path point, pop it and move to the one after it
+                            if [drone.x, drone.y] == list(drone.path_queue[0]):
+                                drone.path_queue.pop(0)
+                            
+                            if drone.path_queue:
+                                tx, ty = drone.path_queue[0]
                             else:
-                                nx, ny = drone.x, drone.y
+                                # Path finished
+                                continue
+                        elif drone.target_x is not None and drone.target_y is not None:
+                            tx, ty = drone.target_x, drone.target_y
                         else:
-                            tar_x, tar_y = drone.target_x, drone.target_y
-                            nx, ny = drone.x, drone.y
-                            # Check for None before movement calcs to avoid TypeError
-                            if tar_x is not None and tar_y is not None:
-                                if nx != tar_x:
-                                    nx += 1 if tar_x > nx else -1
-                                elif ny != tar_y:
-                                    ny += 1 if tar_y > ny else -1
-                                tx, ty = tar_x, tar_y
+                            # Nowhere to go
+                            continue
+
+                        # Calculate next step (1 cell move) toward (tx, ty)
+                        nx, ny = drone.x, drone.y
+                        if nx != tx:
+                            nx += 1 if tx > nx else -1
+                        elif ny != ty:
+                            ny += 1 if ty > ny else -1
+
+                        # --- SMART REROUTING ---
+                        # If the calculated step is blocked or we are moving toward an impassable cell
+                        if not sim.is_passable(nx, ny):
+                            # Target step is blocked by mountain - find best detour
+                            detour_x, detour_y = sim.get_best_bypass(drone.x, drone.y, tx, ty)
+                            if (detour_x, detour_y) != (drone.x, drone.y):
+                                if not drone.path_queue: # Only log for transit/RTB detour to avoid spamming during scans
+                                    sim.log(f"⛰️ {d_id} rerouting around mountain obstacle.", "INFO", d_id)
+                                nx, ny = detour_x, detour_y
                             else:
+                                # Physically stuck - stay put
                                 nx, ny = drone.x, drone.y
-                                tx, ty = nx, ny
 
                         # Arrived at current step target
                         if (drone.x, drone.y) == (nx, ny) and not drone.path_queue:
@@ -216,8 +231,11 @@ async def run_simulation_loop():
                                         sim.total_rescued += 1
                                         sim.log(f"Survivor guided safely to base station!", "SUCCESS", d_id)
 
-                        # Battery drain
-                        drone.battery = max(0.0, drone.battery - 1.0)
+                        # Battery drain: 2.0% in hazards, 1.0% normally
+                        drain = 2.0 if sim.zone.hazard_cells[ny][nx] else 1.0
+                        if drain > 1.0:
+                            sim.log(f"🔥 {d_id} high-energy hazard traversal (-2% battery)", "WARN", d_id)
+                        drone.battery = max(0.0, drone.battery - drain)
                         drone.status = "ON_MISSION"
                         drone.status_label = f"→({tx},{ty})"
 

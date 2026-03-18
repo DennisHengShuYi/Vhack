@@ -295,6 +295,33 @@ class SimulationState:
             zone.status = ZoneStatus.UNSCANNED
             zone.assigned_to = None
 
+    def is_passable(self, x: int, y: int) -> bool:
+        """Check if a cell is passable (not a mountain and within bounds)."""
+        if x < 0 or x >= GRID_W or y < 0 or y >= GRID_H:
+            return False
+        return self.zone.terrain_types[y][x] != 'mountain'
+
+    def get_best_bypass(self, curr_x: int, curr_y: int, tar_x: int, tar_y: int) -> tuple[int, int]:
+        """Find the best neighboring cell to bypass an obstacle, preferring unscanned cells."""
+        neighbors = []
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                if dx == 0 and dy == 0: continue
+                nx, ny = curr_x + dx, curr_y + dy
+                if self.is_passable(nx, ny):
+                    # Weight by: 1. Unscanned (primary), 2. Closeness to target (secondary)
+                    is_unscanned = not self.zone.scanned_cells[ny][nx]
+                    dist = chebyshev(nx, ny, tar_x, tar_y)
+                    # Score: lower is better. Unscanned gives a huge bonus (-100)
+                    score = dist - (100 if is_unscanned else 0)
+                    neighbors.append(((nx, ny), score))
+        
+        if not neighbors:
+            return curr_x, curr_y # Stuck
+            
+        neighbors.sort(key=lambda x: x[1])
+        return neighbors[0][0]
+
     def assign_zone(self, drone_id: str, zone_id: str) -> Dict[str, Any]:
         """Generates path sequence: transit to closest corner + zig-zag scan."""
         drone = self.drones.get(drone_id)
@@ -328,10 +355,19 @@ class SimulationState:
             temp_path.append([curr_x, curr_y])
 
         while (curr_x, curr_y) != (target_sx, target_sy):
+            prev_x, prev_y = curr_x, curr_y
+            # Try normal step
             if curr_x < target_sx: curr_x += 1
             elif curr_x > target_sx: curr_x -= 1
             if curr_y < target_sy: curr_y += 1
             elif curr_y > target_sy: curr_y -= 1
+            
+            if not self.is_passable(curr_x, curr_y):
+                # Detour around mountain
+                curr_x, curr_y = self.get_best_bypass(prev_x, prev_y, target_sx, target_sy)
+                if (curr_x, curr_y) == (prev_x, prev_y):
+                    break # Really stuck
+            
             temp_path.append([curr_x, curr_y])
 
         if zone.residual_path and len(zone.residual_path) > 0:
@@ -358,13 +394,19 @@ class SimulationState:
                 for x in xs:
                     terrain = self.zone.terrain_types[y][x]
                     is_hazard = self.zone.hazard_cells[y][x]
-                    # Anything not 'flat' or marked as a 'hazard' gets pushed to the end of the queue
+                    
+                    # --- TERRAIN AWARE SCANNING ---
+                    # Mountains are skipped entirely - drone cannot scan them
+                    if terrain == 'mountain':
+                        continue
+
+                    # Anything else that is not 'flat' or is a 'hazard' gets pushed to the end of the queue
                     if terrain == 'flat' and not is_hazard:
                         flat_priority.append([x, y])
                     else:
                         low_priority.append([x, y])
             
-            # Assemble: Transit -> Flat Surface Scan -> Tactical Environment Scan (Mountains/Lakes/Hazards)
+            # Assemble: Transit -> Flat Surface Scan -> Tactical Environment Scan (Lakes/Hazards)
             for cell in flat_priority:
                 if not temp_path or temp_path[-1] != cell:
                     temp_path.append(cell)
