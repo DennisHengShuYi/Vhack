@@ -185,11 +185,50 @@ def register_tools(mcp):
         if not idle_drones:
             return "NO_IDLE_DRONES: No drones currently need orders."
 
-        available = sim.get_available_zones()
+        available = [z for z in sim.get_available_zones()
+                     if z["zone_id"] not in sim.reserved_zones]
         survivors_found = sim.total_victims_found
 
         if not available:
+            # Before declaring MISSION COMPLETE, verify actual cell coverage.
+            # Zones can be falsely COMPLETE (race) or stuck IN_PROGRESS (no drone assigned).
+            # Reset any such zones so the agent can reassign them.
+            recovered = False
+            for zid, z in sim.zone.zones.items():
+                if z.status == ZoneStatus.COMPLETE:
+                    has_unscanned = any(
+                        not sim.zone.scanned_cells[cy][cx]
+                        for cy in range(z.sy, z.ey + 1)
+                        for cx in range(z.sx, z.ex + 1)
+                        if not sim.is_inaccessible(cx, cy)
+                    )
+                    if has_unscanned:
+                        z.status = ZoneStatus.UNSCANNED
+                        z.assigned_to = None
+                        recovered = True
+                elif z.status == ZoneStatus.IN_PROGRESS:
+                    # Release zones claimed but with no active drone scanning them
+                    if not any(d.assigned_zone_id == zid for d in sim.drones.values()):
+                        z.status = ZoneStatus.UNSCANNED
+                        z.assigned_to = None
+                        recovered = True
+            if recovered:
+                available = [z for z in sim.get_available_zones()
+                             if z["zone_id"] not in sim.reserved_zones]
+
+        if not available:
+            # Check if any zones are still actively being scanned
+            still_scanning = [
+                f"{z.id}→{z.assigned_to}"
+                for z in sim.zone.zones.values()
+                if z.status == ZoneStatus.IN_PROGRESS
+            ]
             drone_names = ", ".join(d_id for d_id, _ in idle_drones)
+            if still_scanning:
+                # Not done yet — other drones are still scanning. Idle drones should wait.
+                return (f"NO_ZONES_AVAILABLE: Zones still being scanned: {', '.join(still_scanning)}. "
+                        f"Idle drones [{drone_names}] — send them return_to_base() to conserve battery "
+                        f"and re-assign when zones free up.")
             return (f"MISSION COMPLETE: Grid fully searched. "
                     f"Found {survivors_found} survivors. "
                     f"Drones available for recall: {drone_names}")
@@ -232,6 +271,15 @@ def register_tools(mcp):
             f"{coverage_pct}% grid covered, {s_found}/{len(sim.zone.survivors)} survivors found"
         )
 
+        # Determine which zone rows already have an active drone (to guide spread)
+        # Grid has 3 rows of zones (row 0: y=0-4, row 1: y=5-9, row 2: y=10-14)
+        zone_height = sim.zone.height
+        row_size = zone_height // 3  # typically 5
+        active_rows: set = set()
+        for _, z_obj in sim.zone.zones.items():
+            if z_obj.status == ZoneStatus.IN_PROGRESS:
+                active_rows.add(z_obj.sy // row_size)
+
         for d_id, drone in idle_drones:
             report.append(f"\n[DRONE: {d_id}] Battery: {drone.battery:.1f}% @ ({drone.x},{drone.y})")
             options = []
@@ -246,17 +294,25 @@ def register_tools(mcp):
                     chebyshev(z["ex"], z["ey"], base_x, base_y),
                     chebyshev(z["sx"], z["ey"], base_x, base_y),
                 )
-                total_needed = transit + z["scan_cost"] + return_cost
 
                 z_obj = sim.zone.zones[z["zone_id"]]
                 terrain_counts: dict = {}
+                # Terrain-weighted scan cost over UNSCANNED cells only.
+                # Cells already scanned opportunistically don't need revisiting, so
+                # partial/residual zones cost proportionally less — a drone with moderate
+                # battery can still be assigned to an 80%-scanned zone.
+                scan_cost_actual = 0.0
                 for cy in range(z_obj.sy, z_obj.ey + 1):
                     for cx in range(z_obj.sx, z_obj.ex + 1):
                         t = sim.zone.terrain_types[cy][cx]
                         terrain_counts[t] = terrain_counts.get(t, 0) + 1
+                        if not sim.zone.scanned_cells[cy][cx] and not sim.is_inaccessible(cx, cy):
+                            scan_cost_actual += 1.5 if t == 'forest' else 1.0
+
                 terrain_str = " ".join(
                     f"{k.capitalize()}:{v}" for k, v in sorted(terrain_counts.items()) if v > 0
                 )
+                total_needed = transit + scan_cost_actual + return_cost
 
                 total_cells = (z_obj.ey - z_obj.sy + 1) * (z_obj.ex - z_obj.sx + 1)
                 scanned_count = sum(
@@ -265,19 +321,30 @@ def register_tools(mcp):
                     if sim.zone.scanned_cells[cy][cx]
                 )
                 scan_pct = int(100 * scanned_count / total_cells) if total_cells > 0 else 0
+                zone_row = z_obj.sy // row_size
+                row_gap = zone_row not in active_rows  # True = this row has no active drone
 
                 options.append({
                     "zone_id": z["zone_id"],
                     "transit": transit,
-                    "scan": z["scan_cost"],
+                    "scan": scan_cost_actual,
                     "return": return_cost,
                     "total": total_needed,
                     "priority": z["priority"],
                     "terrain": terrain_str,
                     "scan_pct": scan_pct,
+                    "zone_row": zone_row,
+                    "row_gap": row_gap,
                 })
 
-            options.sort(key=lambda x: (x["transit"], 0 if x["priority"] == "HIGH" else 1))
+            options.sort(key=lambda x: (
+                # 1st: city terrain priority — HIGH > MEDIUM > LOW
+                0 if x["priority"] == "HIGH" else (1 if x["priority"] == "MEDIUM" else 2),
+                # 2nd: gap rows as tiebreaker within same priority tier
+                0 if x["row_gap"] else 1,
+                # 3rd: nearest first
+                x["transit"]
+            ))
             valid_options = [o for o in options if o["total"] + BATTERY_RETURN_RESERVE <= drone.battery][:3]
 
             if not valid_options:
@@ -288,10 +355,11 @@ def register_tools(mcp):
                     risk = "LOW" if remaining > 20 else ("MEDIUM" if remaining > 10 else "HIGH")
                     has_residual = bool(sim.zone.zones[opt['zone_id']].residual_path)
                     partial = " [PARTIAL-resume]" if has_residual else ""
+                    gap_tag = " [GAP-ROW: no drone in this sector]" if opt["row_gap"] else ""
                     report.append(
                         f"  Opt {i+1}: assign_scan_zone(\"{d_id}\", \"{opt['zone_id']}\") "
                         f"- Priority={opt['priority']}, Transit={opt['transit']}, Cost={opt['total']}, "
-                        f"Risk={risk}, Terrain=[{opt['terrain']}], Scanned={opt['scan_pct']}%{partial}"
+                        f"Risk={risk}, Terrain=[{opt['terrain']}], Scanned={opt['scan_pct']}%{partial}{gap_tag}"
                     )
 
         return "\n".join(report)
@@ -415,17 +483,52 @@ def register_tools(mcp):
             return f"Error: Zone {zone_id} does not exist. Use get_grid_state() to see valid IDs."
         if zone.status != ZoneStatus.UNSCANNED:
             return f"Error: Zone {zone_id} is already {zone.status.value}. Pick a different zone."
+        if zone_id in sim.reserved_zones:
+            reserved_for = sim.reserved_zones[zone_id]
+            return (f"Error: Zone {zone_id} is reserved for {reserved_for} "
+                    f"(residual coverage after current job). Choose a different zone.")
+
+        # Pre-check: if all cells already scanned (opportunistic transit), auto-complete and skip
+        unscanned_count = sum(
+            1 for y in range(zone.sy, zone.ey + 1)
+            for x in range(zone.sx, zone.ex + 1)
+            if not sim.zone.scanned_cells[y][x] and not sim.is_inaccessible(x, y)
+        )
+        if unscanned_count == 0:
+            zone.status = ZoneStatus.COMPLETE
+            return (
+                f"Zone {zone_id} already fully covered by opportunistic scan — auto-completed. "
+                f"Choose a different zone."
+            )
 
         base_x, base_y = sim.base_station
-        transit_cost = chebyshev(drone.x, drone.y, zone.sx, zone.sy)
-        scan_cost = (zone.ex - zone.sx + 1) * (zone.ey - zone.sy + 1)
-        return_cost = abs(zone.ex - base_x) + abs(zone.ey - base_y)
+        # Use nearest corner for transit (same as get_idle_drones) — drones pick closest entry point
+        transit_cost = min(
+            chebyshev(drone.x, drone.y, zone.sx, zone.sy),
+            chebyshev(drone.x, drone.y, zone.ex, zone.sy),
+            chebyshev(drone.x, drone.y, zone.sx, zone.ey),
+            chebyshev(drone.x, drone.y, zone.ex, zone.ey),
+        )
+        # Terrain-weighted scan cost over UNSCANNED cells only (mirrors get_idle_drones logic).
+        # Partial/residual zones cost proportionally less so drones with moderate battery
+        # can still be assigned rather than being sent to RTB unnecessarily.
+        scan_cost = sum(
+            1.5 if sim.zone.terrain_types[y][x] == 'forest' else 1.0
+            for y in range(zone.sy, zone.ey + 1)
+            for x in range(zone.sx, zone.ex + 1)
+            if not sim.zone.scanned_cells[y][x] and not sim.is_inaccessible(x, y)
+        )
+        # Use Chebyshev (diagonal movement) for return — consistent with get_idle_drones
+        return_cost = max(
+            chebyshev(zone.ex, zone.ey, base_x, base_y),
+            chebyshev(zone.sx, zone.ey, base_x, base_y),
+        )
         total_estimated = transit_cost + scan_cost + return_cost
 
-        if drone.battery < total_estimated:
+        if drone.battery < total_estimated + BATTERY_RETURN_RESERVE:
             return (
                 f"Error: {drone_id} has {drone.battery:.1f}% battery but zone {zone_id} "
-                f"requires ~{total_estimated:.0f}%. REJECTED. "
+                f"requires ~{total_estimated + BATTERY_RETURN_RESERVE:.0f}% (incl. reserve). REJECTED. "
                 f"Pick a closer zone or call return_to_base(\"{drone_id}\")."
             )
 
@@ -451,6 +554,13 @@ def register_tools(mcp):
             return f"Error: {drone_id} is OFFLINE — cannot issue RTB command."
 
         base_x, base_y = sim.base_station
+
+        # If drone is already at base and charged, skip redundant RTB
+        if (drone.x, drone.y) == (base_x, base_y) and drone.battery >= 90 and not drone.assigned_zone_id:
+            return (f"Info: {drone_id} is already at base ({base_x},{base_y}) "
+                    f"with {drone.battery:.0f}% battery — no RTB needed. "
+                    f"Use assign_scan_zone() to dispatch it.")
+
         if drone.assigned_zone_id:
             zid = drone.assigned_zone_id
             if drone.path_queue and zid in sim.zone.zones:

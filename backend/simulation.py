@@ -67,6 +67,7 @@ class Drone(BaseModel):
     path_queue: List[List[int]] = []
     scanned_grids: int = 0
     assigned_zone_id: Optional[str] = None
+    pending_zone_id: Optional[str] = None  # residual zone reserved for this drone after current job
 
 
 class DisasterZone(BaseModel):
@@ -290,6 +291,7 @@ class SimulationState:
         self._log_id = 0
         self.tick_count: int = 0                   # Incremented every sim tick
         self.streaming_text: str = ""              # Live LLM token buffer for real-time frontend display
+        self.reserved_zones: Dict[str, str] = {}  # zone_id → drone_id that will cover residual
 
     def _sample_unique_points(self, count: int) -> List[tuple]:
         cells = [(x, y) for y in range(GRID_H) for x in range(GRID_W)]
@@ -325,7 +327,27 @@ class SimulationState:
         return chebyshev(drone.x, drone.y, bx, by)
 
     def minimum_battery_to_return(self, drone: Drone) -> float:
-        return (self._distance_to_home(drone) * BATTERY_DRAIN_MOVE) + BATTERY_RETURN_RESERVE
+        bx, by = self.base_station
+        curr_dist = self._distance_to_home(drone)
+
+        # When drone is assigned to a zone but hasn't entered it yet (mid-transit),
+        # use the zone's farthest corner distance as the effective return distance.
+        # This prevents false RTB triggers during transit — the assignment battery
+        # check already validated the drone has sufficient charge for the full mission.
+        if drone.assigned_zone_id:
+            zone = self.zone.zones.get(drone.assigned_zone_id)
+            if zone:
+                in_zone = (zone.sx <= drone.x <= zone.ex and zone.sy <= drone.y <= zone.ey)
+                if not in_zone:
+                    zone_max_dist = max(
+                        chebyshev(zone.ex, zone.ey, bx, by),
+                        chebyshev(zone.sx, zone.ey, bx, by),
+                        chebyshev(zone.ex, zone.sy, bx, by),
+                        chebyshev(zone.sx, zone.sy, bx, by),
+                    )
+                    return (zone_max_dist * BATTERY_DRAIN_MOVE) + BATTERY_RETURN_RESERVE
+
+        return (curr_dist * BATTERY_DRAIN_MOVE) + BATTERY_RETURN_RESERVE
 
     def should_return_to_base(self, drone: Drone) -> bool:
         if drone.is_charging:
@@ -369,13 +391,11 @@ class SimulationState:
         if not drone or not zone:
             return {"error": "Drone or Zone not found"}
 
-        drone.assigned_zone_id = zone_id
-        drone.path_queue = []
-        drone.status = "ON_MISSION"
-        drone.status_label = f"SCANNING {zone_id}"
-        drone.scanned_grids = 0
-
         start_x, start_y, end_x, end_y = zone.sx, zone.sy, zone.ex, zone.ey
+
+        # Build entire path in a local list first, then assign atomically to avoid
+        # a race where the tick loop sees an empty path_queue mid-construction.
+        new_queue: List[List[int]] = []
 
         if zone.residual_path:
             target_sx, target_sy = zone.residual_path[0]
@@ -398,38 +418,51 @@ class SimulationState:
         curr_x, curr_y = drone.x, drone.y
 
         if (curr_x, curr_y) == (target_sx, target_sy):
-            drone.path_queue.append([curr_x, curr_y])
+            new_queue.append([curr_x, curr_y])
 
         while (curr_x, curr_y) != (target_sx, target_sy):
             if curr_x < target_sx: curr_x += 1
             elif curr_x > target_sx: curr_x -= 1
             if curr_y < target_sy: curr_y += 1
             elif curr_y > target_sy: curr_y -= 1
-            drone.path_queue.append([curr_x, curr_y])
+            new_queue.append([curr_x, curr_y])
 
         if zone.residual_path and len(zone.residual_path) > 0:
-            # First point is already in path_queue due to the transit logic above
-            for i in range(1, len(zone.residual_path)):
-                drone.path_queue.append(zone.residual_path[i])
+            # Resume from saved residual, skipping cells already scanned since the diversion
+            for cell in zone.residual_path[1:]:
+                cx, cy = cell
+                if not self.zone.scanned_cells[cy][cx]:
+                    new_queue.append(cell)
             zone.residual_path = []
+            # Full-zone sweep: catch any cells missed before the diversion started
+            for sy in range(start_y, end_y + 1):
+                for sx in range(start_x, end_x + 1):
+                    if not self.zone.scanned_cells[sy][sx] and not self.is_inaccessible(sx, sy):
+                        if [sx, sy] not in new_queue:
+                            new_queue.append([sx, sy])
         else:
             rev_x = (target_sx == end_x)
             rev_y = (target_sy == end_y)
             y_range = range(start_y, end_y + 1)
             if rev_y:
                 y_range = range(end_y, start_y - 1, -1)
- 
+
             for i, y in enumerate(y_range):
                 if i % 2 == 0:
                     xs = range(end_x, start_x - 1, -1) if rev_x else range(start_x, end_x + 1)
                 else:
                     xs = range(start_x, end_x + 1) if rev_x else range(end_x, start_x - 1, -1)
                 for x in xs:
-                    # Skip already-scanned cells — drone scans opportunistically while transiting
-                    if self.zone.scanned_cells[y][x]:
-                        continue
-                    if not drone.path_queue or drone.path_queue[-1] != [x, y]:
-                        drone.path_queue.append([x, y])
+                    if not new_queue or new_queue[-1] != [x, y]:
+                        new_queue.append([x, y])
+
+        # path_queue is assigned FIRST so the tick loop never sees assigned_zone_id set
+        # with an empty queue (which would falsely mark the zone COMPLETE).
+        drone.path_queue = new_queue
+        drone.assigned_zone_id = zone_id
+        drone.status = "ON_MISSION"
+        drone.status_label = f"SCANNING {zone_id}"
+        drone.scanned_grids = 0
 
         return {
             "success": True,
@@ -681,6 +714,17 @@ class SimulationState:
             for x in range(GRID_W)
             if not self.zone.scanned_cells[y][x] and not self.zone.hazard_cells[y][x]
         ]
+
+    def get_nearby_unscanned_cells(self, x: int, y: int, radius: int = 6) -> List[List[int]]:
+        """Returns unscanned, accessible cells within Chebyshev radius, sorted by distance."""
+        candidates = []
+        for cy in range(max(0, y - radius), min(self.zone.height, y + radius + 1)):
+            for cx in range(max(0, x - radius), min(self.zone.width, x + radius + 1)):
+                if not self.zone.scanned_cells[cy][cx] and not self.is_inaccessible(cx, cy):
+                    dist = chebyshev(x, y, cx, cy)
+                    candidates.append((dist, [cx, cy]))
+        candidates.sort(key=lambda c: c[0])
+        return [c[1] for c in candidates]
 
     def get_status(self) -> Dict[str, Any]:
         scanned = sum(

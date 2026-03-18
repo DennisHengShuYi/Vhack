@@ -67,9 +67,12 @@ Within a single planning block, EVERY drone MUST have a DIFFERENT DECISION zone.
 === STRATEGIC RULES ===
 - Never leave an idle drone without an assignment.
 - Never assign a zone already listed as IN_PROGRESS — another drone is scanning it.
-- Opt 1 (nearest) is usually best unless Opt 2/3 is HIGH priority AND transit difference is ≤ 5 cells.
+- OPTIONS ARE SORTED BY PRIORITY FIRST: Opt 1 is always the highest-priority (city terrain) zone. ALWAYS prefer Opt 1 unless it conflicts with ZONE UNIQUENESS.
+- HIGH-priority zones (City terrain) MUST be assigned before MEDIUM or LOW-priority zones regardless of transit cost, unless the transit difference exceeds 12 cells.
+- [GAP-ROW] tag means no drone currently covers that row — within the same priority tier, prefer the gap-row zone for better spatial coverage. Never skip a HIGH-priority zone to fill a LOW-priority gap row.
+- SPATIAL SPREAD: In any planning batch, no two drones should be assigned to adjacent zones. Prefer zones in different rows (Row 0: Z0-Z3, Row 1: Z4-Z7, Row 2: Z8-Z11).
 - Prefer [PARTIAL-resume] zones — they have saved scan progress and will complete faster.
-- ALPHA-5 assists the most-needed zone or covers zones another drone abandoned.
+- All 5 drones are equal — ALPHA-5 is assigned the next best available zone exactly like ALPHA-1–4. No special assist role.
 - If all zones are claimed or no valid option, send idle drones to return_to_base().
 
 Write your Mission Log clearly so the human observer can follow your logic, then execute all assignments.
@@ -78,8 +81,10 @@ Write your Mission Log clearly so the human observer can follow your logic, then
 When you see "MISSION START — STRATEGIC BRIEFING REQUIRED":
 1. Review the terrain analysis already logged (shows zone priorities from city/forest/lake counts).
 2. Write a concise Mission Plan BEFORE calling any tools:
-   - List which HIGH-priority zones you will target first and which drones you'll send.
-   - Note any LOW-priority zones you'll assign only after high-value zones are covered.
+   - Identify ALL HIGH-priority (city terrain) zones first — these are your primary targets.
+   - Assign drones to HIGH-priority zones first, then MEDIUM, then LOW.
+   - Spread drones across the grid — do not cluster all drones in the same row or corner.
+   - Try to send at least one drone to each grid row (Row 0: Z0-Z3, Row 1: Z4-Z7, Row 2: Z8-Z11) at mission start for coverage breadth.
 3. Then execute all assignments in one pass.
 This briefing runs only once at mission start. Subsequent rounds follow the normal mandate.
 """
@@ -173,21 +178,40 @@ class AgentOrchestrator:
         Fallback: parse the options menu and greedily assign each drone to its
         highest-scored valid option (Opt 1), or return_to_base if none available.
         Ensures no two drones are assigned the same zone.
+        Any drone that has options but all zones are already taken by earlier drones
+        in the same batch gets RTB — prevents drones getting stuck idle indefinitely.
         """
+        import re
         actions = []
         assigned_zones: set[str] = set()
+
+        # For NO_ZONES_AVAILABLE, only RTB the idle drones listed in [...] brackets.
+        # The message also names actively-scanning drones in "Zones still being scanned: ZX→ALPHA-N"
+        # — a bare re.findall over the whole string would match those too and abort their scans.
+        if "NO_ZONES_AVAILABLE" in poll_text:
+            idle_match = re.search(r"Idle drones \[([^\]]+)\]", poll_text)
+            if idle_match:
+                for drone_id in re.findall(r"ALPHA-\d+", idle_match.group(1)):
+                    if drone_id not in assigned_zones:
+                        actions.append(("return", drone_id, None))
+                        assigned_zones.add(drone_id)
+            return actions
+
+        # Track which drones were seen and whether each got an action.
+        # Drones that exhaust all their options (all zones taken by earlier drones)
+        # are sent to RTB rather than left idle with no assignment.
+        drone_got_action: dict[str, bool] = {}
         current_drone = None
-        drone_lines: list[str] = []
 
         for line in poll_text.splitlines():
             line = line.strip()
             if line.startswith("[DRONE:"):
                 current_drone = line.split("DRONE:")[1].split("]")[0].strip()
-                drone_lines = []
+                drone_got_action[current_drone] = False
             elif current_drone:
-                drone_lines.append(line)
                 if "return_to_base()" in line and "Battery too low" in line:
                     actions.append(("return", current_drone, None))
+                    drone_got_action[current_drone] = True
                     current_drone = None
                 elif line.startswith("Opt") and "assign_scan_zone" in line:
                     parts = line.split('"')
@@ -196,8 +220,16 @@ class AgentOrchestrator:
                         if zone_id not in assigned_zones:
                             actions.append(("assign", current_drone, zone_id))
                             assigned_zones.add(zone_id)
+                            drone_got_action[current_drone] = True
                             current_drone = None
-                        # else: skip this opt, look for next opt line
+                        # else: zone taken by earlier drone — keep parsing next Opt line
+
+        # Any drone that was parsed but never got an action (all its zone options were
+        # already claimed by earlier drones in this batch) → send to RTB.
+        for drone_id, got_action in drone_got_action.items():
+            if not got_action:
+                actions.append(("return", drone_id, None))
+
         return actions
 
     def _extract_memory_events(self, messages: list, tick: int) -> list[str]:
@@ -285,6 +317,12 @@ class AgentOrchestrator:
 
                         print(f"\n--- SENTINEL Tick {tick} ---", file=sys.stderr)
 
+                        # ── ALL ZONES ACTIVE — idle drones RTB and wait ─────
+                        if "NO_ZONES_AVAILABLE" in poll_text:
+                            await self._execute_rule_based(session, poll_text)
+                            await asyncio.sleep(2.0)
+                            continue
+
                         # ── MISSION COMPLETE: recall swarm, stop loop ────────
                         if "MISSION COMPLETE" in poll_text:
                             if not mission_complete_logged:
@@ -341,12 +379,25 @@ class AgentOrchestrator:
                                 new_events = self._extract_memory_events(messages, tick)
                                 self.mission_memory.extend(new_events)
 
+                                # Safety net: if LLM reasoned but made no actual tool calls,
+                                # fall back to rule-based so drones never stay stuck idle.
+                                tool_executed = any(
+                                    getattr(m, 'type', None) == 'tool'
+                                    for m in messages
+                                )
+                                if not tool_executed:
+                                    print("  [FALLBACK] LLM produced no tool calls — rule-based assignment.", file=sys.stderr)
+                                    await self._broadcast_log(http_session,
+                                        "⚡ LLM reasoned without acting — auto-assigning via rule-based fallback.")
+                                    await self._execute_rule_based(session, poll_text)
+
                             except asyncio.TimeoutError:
                                 await self._broadcast_log(http_session, "⏱️ LLM timeout — rule-based fallback.")
                                 await self._execute_rule_based(session, poll_text)
                             except Exception as e:
                                 print(f"  [ERROR] {e}", file=sys.stderr)
                                 await self._broadcast_log(http_session, f"[ERROR] {e}")
+                                await self._execute_rule_based(session, poll_text)
                         else:
                             # Rule-based fallback — no LLM, or trivial tick
                             actions = self._rule_based_assignments(poll_text)
@@ -383,10 +434,14 @@ class AgentOrchestrator:
         for action in actions:
             try:
                 if action[0] == "assign":
-                    await session.call_tool("assign_scan_zone",
-                                            {"drone_id": action[1], "zone_id": action[2]})
+                    result = await session.call_tool("assign_scan_zone",
+                                                     {"drone_id": action[1], "zone_id": action[2]})
+                    text = result.content[0].text if result.content else ""
+                    print(f"  [FALLBACK] assign {action[1]}→{action[2]}: {text[:120]}", file=sys.stderr)
                 elif action[0] == "return":
-                    await session.call_tool("return_to_base", {"drone_id": action[1]})
+                    result = await session.call_tool("return_to_base", {"drone_id": action[1]})
+                    text = result.content[0].text if result.content else ""
+                    print(f"  [FALLBACK] RTB {action[1]}: {text[:80]}", file=sys.stderr)
             except Exception as e:
                 print(f"  [FALLBACK ERROR] {e}", file=sys.stderr)
 
