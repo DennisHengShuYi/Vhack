@@ -45,6 +45,8 @@ class Drone(BaseModel):
     base_x: int = 0
     base_y: int = 0
     battery: float = 100.0
+    is_active: bool = False       # False until heartbeat connects the drone
+    join_tick: int = 0            # Tick at which this drone first comes online
     is_charging: bool = False
     is_waiting_response: bool = False
     returning_to_base: bool = False
@@ -56,7 +58,7 @@ class Drone(BaseModel):
     last_thermal_matrix: Optional[List[List[int]]] = None
     last_thermal_scan: Optional[Dict[str, Any]] = None
     charge_cycles: int = 0
-    status_label: str = "STANDBY"
+    status_label: str = "OFFLINE"
     path_history: List[List[int]] = []
     is_guiding: bool = False
     guiding_victim_id: Optional[str] = None
@@ -262,6 +264,8 @@ class SimulationState:
         # Ensure base cell is not a hazard
         self.zone.hazard_cells[base_y][base_x] = False
         spawn_points = self._sample_accessible_points(NUM_DRONES)
+        # Staggered join ticks: ALPHA-1 at tick 0, then one every 4 ticks (~2.8s apart)
+        JOIN_TICKS = [0, 4, 7, 10, 13]
         self.drones: Dict[str, Drone] = {}
         for i in range(1, NUM_DRONES + 1):
             start_x, start_y = spawn_points[i - 1]
@@ -272,8 +276,10 @@ class SimulationState:
                 y=start_y,
                 base_x=base_x,
                 base_y=base_y,
-                status="IDLE",
-                status_label="STANDBY",
+                status="OFFLINE",
+                status_label="OFFLINE",
+                is_active=False,
+                join_tick=JOIN_TICKS[i - 1],
             )
         self.mission_log: List[Dict] = []
         self.mission_active = False
@@ -282,7 +288,8 @@ class SimulationState:
         self.total_victims_found = 0
         self.total_rescued = 0
         self._log_id = 0
-        self.streaming_text: str = ""  # Live LLM token buffer for real-time frontend display
+        self.tick_count: int = 0                   # Incremented every sim tick
+        self.streaming_text: str = ""              # Live LLM token buffer for real-time frontend display
 
     def _sample_unique_points(self, count: int) -> List[tuple]:
         cells = [(x, y) for y in range(GRID_H) for x in range(GRID_W)]
@@ -428,6 +435,41 @@ class SimulationState:
             "success": True,
             "message": f"Assigned {drone_id} to zone {zone_id} ({start_x},{start_y} -> {end_x},{end_y})"
         }
+
+    # ─── Heartbeat Protocol ──────────────────────────────────────────────────────
+
+    def simulate_heartbeats(self) -> None:
+        """
+        Called every sim tick. Brings drones online in staggered order based on
+        join_tick, and marks drones OFFLINE if their battery is completely dead.
+        """
+        if not self.mission_active:
+            return
+
+        for d_id, drone in self.drones.items():
+            was_active = drone.is_active
+
+            # Bring drone online when its join tick is reached
+            if not drone.is_active and self.tick_count >= drone.join_tick:
+                drone.is_active = True
+                drone.status = "IDLE"
+                drone.status_label = "STANDBY"
+                self.log(
+                    f"📡 HEARTBEAT: {d_id} joined the swarm mesh network. "
+                    f"Battery: {drone.battery:.0f}% | Position: ({drone.x},{drone.y})",
+                    "SUCCESS",
+                    d_id,
+                )
+
+            # Mark drone offline if battery completely dead
+            if drone.is_active and drone.battery <= 0:
+                drone.is_active = False
+                drone.status = "OFFLINE"
+                drone.status_label = "OFFLINE (Dead Battery)"
+                drone.target_x = None
+                drone.target_y = None
+                drone.path_queue = []
+                self.log(f"🔴 {d_id} lost connection — battery depleted.", "WARN", d_id)
 
     def _ts(self) -> str:
         mt = self.mission_start_time

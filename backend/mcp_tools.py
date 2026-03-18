@@ -174,7 +174,8 @@ def register_tools(mcp):
 
         idle_drones = [
             (d_id, d) for d_id, d in sim.drones.items()
-            if (d.target_x is None
+            if (d.is_active                    # only connected drones
+                and d.target_x is None
                 and not d.path_queue
                 and not d.returning_to_base
                 and not d.is_charging
@@ -402,6 +403,8 @@ def register_tools(mcp):
         drone = sim.drones.get(drone_id)
         if not drone:
             return f"Error: Drone {drone_id} not found."
+        if not drone.is_active:
+            return f"Error: {drone_id} is OFFLINE — no heartbeat signal. Cannot assign mission."
         if drone.is_waiting_response:
             return f"Error: {drone_id} is on VICTIM STANDBY. Cannot reassign."
         if drone.is_charging and drone.battery < 90:
@@ -444,6 +447,8 @@ def register_tools(mcp):
         drone = sim.drones.get(drone_id)
         if not drone:
             return f"Error: Drone {drone_id} not found."
+        if not drone.is_active:
+            return f"Error: {drone_id} is OFFLINE — cannot issue RTB command."
 
         base_x, base_y = sim.base_station
         if drone.assigned_zone_id:

@@ -409,20 +409,32 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           </div>
           <div className="tab-content glass scroll-area">
             <div className="drone-list">
-              {displayedDrones.map((drone: any) => (
+              {displayedDrones.map((drone: any) => {
+                const isOffline = !drone.is_active;
+                return (
                 <motion.div
                   key={drone.id}
-                  className={`drone-card ${activeDroneId === drone.id ? 'active' : ''} ${drone.is_waiting_response ? 'alert' : ''}`}
+                  className={`drone-card ${activeDroneId === drone.id ? 'active' : ''} ${drone.is_waiting_response ? 'alert' : ''} ${isOffline ? 'offline' : ''}`}
                   whileHover={{ scale: 1.02 }}
                   onClick={() => setActiveDroneId(drone.id)}
                 >
                   <div className="drone-card-header">
-                    <span className="drone-id font-mono">{drone.id}</span>
+                    <div className="flex-row gap-2 items-center">
+                      <span className={`heartbeat-dot ${isOffline ? 'offline' : 'online'}`} title={isOffline ? 'No signal' : 'Connected'} />
+                      <span className="drone-id font-mono">{drone.id}</span>
+                    </div>
                     <div className="flex-row gap-2 items-center">
                       <span className="text-xs opacity-60">{drone.battery.toFixed(0)}%</span>
                       <div className={`status-dot ${drone.status_label.toLowerCase().replace(/ /g, '-')}`}></div>
                     </div>
                   </div>
+                  {isOffline ? (
+                    <div className="drone-offline-body">
+                      <WifiOff size={18} className="offline-icon" />
+                      <span className="offline-label">AWAITING HEARTBEAT</span>
+                      <span className="offline-sublabel">Joining swarm mesh network…</span>
+                    </div>
+                  ) : (
                   <div className="drone-card-body">
                     <div className="drone-telemetry">
                       <div className="tel-row">
@@ -441,8 +453,10 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
                       </div>
                     </div>
                   </div>
+                  )}
                 </motion.div>
-              ))}
+                );
+              })}
             </div>
           </div>
         </section>
@@ -532,14 +546,15 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
                     {dronesAtPos.length === 1 && (() => {
                       const d = dronesAtPos[0];
                       const returning = isReturningDrone(d);
+                      const offline = !d.is_active;
                       return (
                         <motion.div
                           layoutId={`drone-${d.id}`}
-                          className={`drone-marker ${d.is_waiting_response ? 'special' : ''} ${returning ? 'returning' : ''} ${showRtbOnly && !returning ? 'dimmed' : ''}`}
-                          title={d.id}
+                          className={`drone-marker ${d.is_waiting_response ? 'special' : ''} ${returning ? 'returning' : ''} ${offline ? 'offline' : ''} ${showRtbOnly && !returning ? 'dimmed' : ''}`}
+                          title={offline ? `${d.id} — OFFLINE` : d.id}
                         >
                           <div className="content-wrapper">
-                            <Cpu size={14} />
+                            {offline ? <WifiOff size={11} /> : <Cpu size={14} />}
                             <span className="d-label font-mono">{d.id.split('-')[1]}</span>
                           </div>
                         </motion.div>
@@ -950,6 +965,23 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
         }
         .drone-card.active { border-color: var(--accent-cyan); background: rgba(0, 243, 255, 0.05); }
         .drone-card.alert { border-color: var(--accent-amber); background: rgba(255, 179, 0, 0.1); box-shadow: 0 0 15px rgba(255, 179, 0, 0.2); }
+        .drone-card.offline { border-color: rgba(255,255,255,0.08); background: rgba(0,0,0,0.25); opacity: 0.65; }
+
+        /* Heartbeat indicator dot */
+        .heartbeat-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+        .heartbeat-dot.online { background: var(--accent-success); box-shadow: 0 0 6px var(--accent-success); animation: hb-pulse 2s ease-in-out infinite; }
+        .heartbeat-dot.offline { background: #555; box-shadow: none; }
+        @keyframes hb-pulse { 0%,100%{opacity:1;box-shadow:0 0 4px var(--accent-success);} 50%{opacity:0.5;box-shadow:0 0 10px var(--accent-success);} }
+
+        /* Offline card body */
+        .drone-offline-body { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 12px 0 6px; color: rgba(255,255,255,0.35); }
+        .offline-icon { opacity: 0.4; }
+        .offline-label { font-family: 'Orbitron', monospace; font-size: 0.6rem; letter-spacing: 0.12em; color: rgba(255,255,255,0.4); }
+        .offline-sublabel { font-size: 0.6rem; opacity: 0.4; animation: ellipsis-blink 1.4s step-end infinite; }
+        @keyframes ellipsis-blink { 0%,100%{opacity:0.4;} 50%{opacity:0.15;} }
+
+        /* Offline drone marker on map */
+        .drone-marker.offline { background: rgba(80,80,80,0.6) !important; box-shadow: none !important; border: 1px dashed rgba(255,255,255,0.2) !important; opacity: 0.5; }
         .drone-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
         .drone-id { font-size: 1rem; font-weight: bold; }
         .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #444; }

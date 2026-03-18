@@ -98,10 +98,18 @@ async def run_simulation_loop():
                 sim.mission_active = False
                 sim.mission_end_time = time.time()
 
+            # Heartbeat check — brings drones online in staggered order
+            sim.tick_count += 1
+            sim.simulate_heartbeats()
+
             # Loop A: advance each drone one step
             if sim.mission_active:
                 for d_id, drone in list(sim.drones.items()):
                     drone.base_x, drone.base_y = base_x, base_y
+
+                    # Skip offline drones — not yet connected via heartbeat
+                    if not drone.is_active:
+                        continue
 
                     # Victim standby — drone waits for operator
                     if drone.is_waiting_response:
