@@ -7,7 +7,7 @@ Architecture:
   - Two-phase loop:
       PHASE 1 (POLL): Calls get_idle_drones() — no LLM, cheap MCP call
       PHASE 2 (EXECUTE): If idle drones exist, invokes GPT-4o via LangGraph ReAct agent
-  - Streams chain-of-thought reasoning to frontend via POST /log
+  - Streams chain-of-thought reasoning to frontend via POST /log and /log/stream (live)
   - Falls back to rule-based planner if LLM is unavailable or times out
 """
 import os
@@ -58,9 +58,14 @@ If "Battery too low" → write DECISION → RTB: battery insufficient, then call
 After all analysis blocks, write one mission-level note:
   MISSION PULSE: [1 sentence on coverage pace or any zone needing urgent attention]
 
+=== CRITICAL — ZONE UNIQUENESS ===
+Within a single planning block, EVERY drone MUST have a DIFFERENT DECISION zone.
+- Scan all DECISION → lines you have written — no two can share the same zone_id.
+- If a conflict exists, change the later drone to its next-best option BEFORE calling any tools.
+- This prevents "zone already IN_PROGRESS" errors and wasted LLM round-trips.
+
 === STRATEGIC RULES ===
 - Never leave an idle drone without an assignment.
-- Assign drones to DIFFERENT zones whenever possible (avoid overlap).
 - Never assign a zone already listed as IN_PROGRESS — another drone is scanning it.
 - Opt 1 (nearest) is usually best unless Opt 2/3 is HIGH priority AND transit difference is ≤ 5 cells.
 - Prefer [PARTIAL-resume] zones — they have saved scan progress and will complete faster.
@@ -84,22 +89,33 @@ This briefing runs only once at mission start. Subsequent rounds follow the norm
 from langchain_core.callbacks import AsyncCallbackHandler
 
 class TokenStreamHandler(AsyncCallbackHandler):
-    """Buffers LLM tokens and posts the complete reasoning block when generation finishes."""
-    def __init__(self, broadcast_fn, http_session):
+    """Streams LLM tokens to the frontend in real-time, posts full block on completion."""
+    FLUSH_EVERY = 15  # post streaming update every N tokens
+
+    def __init__(self, broadcast_fn, stream_fn, http_session):
         self.broadcast_fn = broadcast_fn
+        self.stream_fn = stream_fn
         self.http_session = http_session
         self._buffer: list[str] = []
+        self._token_count = 0
 
     async def on_llm_new_token(self, token: str, **kwargs) -> None:
         if token:
             self._buffer.append(token)
+            self._token_count += 1
+            if self._token_count % self.FLUSH_EVERY == 0:
+                # Push live preview to frontend
+                await self.stream_fn(self.http_session, "".join(self._buffer))
 
     async def on_llm_end(self, response, **kwargs) -> None:
         if self._buffer:
             full_text = "".join(self._buffer).strip()
             self._buffer = []
+            self._token_count = 0
             if full_text:
                 await self.broadcast_fn(self.http_session, full_text)
+            # Clear the live streaming buffer
+            await self.stream_fn(self.http_session, "")
 
 
 # ─── Agent Orchestrator ────────────────────────────────────────────────────────
@@ -116,7 +132,6 @@ class AgentOrchestrator:
 
         if provider == "GEMINI" or (not provider and gemini_key and (not openai_key or not openai_key.strip())):
             if gemini_key:
-                # Use Gemini via OpenAI-compatible endpoint
                 self.llm = ChatOpenAI(
                     model=model or "gemini-2.5-flash",
                     openai_api_key=gemini_key,
@@ -140,35 +155,49 @@ class AgentOrchestrator:
             print("[SENTINEL] No API keys — rule-based fallback only.", file=sys.stderr)
 
     async def _broadcast_log(self, session: aiohttp.ClientSession, msg: str):
-        """Posts a log entry to the backend, which adds it to the mission log."""
+        """Posts a completed log entry to the backend mission log."""
         try:
             await session.post(f"{self.backend_url}/log", params={"text": msg, "level": "AI"})
         except Exception as e:
             print(f"Failed to broadcast log: {e}", file=sys.stderr)
 
+    async def _stream_log(self, session: aiohttp.ClientSession, text: str):
+        """Pushes live LLM token buffer to backend for real-time frontend display."""
+        try:
+            await session.post(f"{self.backend_url}/log/stream", params={"text": text})
+        except Exception:
+            pass
+
     def _rule_based_assignments(self, poll_text: str) -> list[tuple[str, str, Optional[str]]]:
         """
         Fallback: parse the options menu and greedily assign each drone to its
         highest-scored valid option (Opt 1), or return_to_base if none available.
-        Returns a list of (tool_name, drone_id, zone_id_or_none) tuples.
+        Ensures no two drones are assigned the same zone.
         """
         actions = []
+        assigned_zones: set[str] = set()
         current_drone = None
+        drone_lines: list[str] = []
+
         for line in poll_text.splitlines():
             line = line.strip()
             if line.startswith("[DRONE:"):
-                # Extract drone ID: "[DRONE: ALPHA-1] Battery: 100.0% @ (5,12)"
                 current_drone = line.split("DRONE:")[1].split("]")[0].strip()
-            elif line.startswith("Opt 1:") and current_drone:
-                # Extract zone: assign_scan_zone("ALPHA-1", "Z0")
-                if "assign_scan_zone" in line:
+                drone_lines = []
+            elif current_drone:
+                drone_lines.append(line)
+                if "return_to_base()" in line and "Battery too low" in line:
+                    actions.append(("return", current_drone, None))
+                    current_drone = None
+                elif line.startswith("Opt") and "assign_scan_zone" in line:
                     parts = line.split('"')
                     if len(parts) >= 4:
-                        actions.append(("assign", current_drone, parts[3]))
-                        current_drone = None
-            elif "return_to_base()" in line and current_drone:
-                actions.append(("return", current_drone, None))
-                current_drone = None
+                        zone_id = parts[3]
+                        if zone_id not in assigned_zones:
+                            actions.append(("assign", current_drone, zone_id))
+                            assigned_zones.add(zone_id)
+                            current_drone = None
+                        # else: skip this opt, look for next opt line
         return actions
 
     def _extract_memory_events(self, messages: list, tick: int) -> list[str]:
@@ -192,6 +221,24 @@ class AgentOrchestrator:
         rtb_count = poll_text.count("Battery too low for any zone")
         return (opt1_count + rtb_count) == drones_mentioned and "Opt 2:" not in poll_text
 
+    async def _recall_all_drones(self, session: ClientSession, http_session: aiohttp.ClientSession):
+        """Sends all active drones back to base at mission end."""
+        try:
+            drones_result = await session.call_tool("list_drones", {})
+            raw = drones_result.content[0].text if drones_result.content else ""
+            drone_ids = [d.strip() for d in raw.replace("Active drones:", "").split(",") if d.strip()]
+            recalled = 0
+            for drone_id in drone_ids:
+                try:
+                    await session.call_tool("return_to_base", {"drone_id": drone_id})
+                    recalled += 1
+                except Exception:
+                    pass
+            await self._broadcast_log(http_session,
+                f"🔁 Swarm recalled — {recalled} drones returning to base. SENTINEL standing down.")
+        except Exception as e:
+            print(f"[RTB ALL] Error: {e}", file=sys.stderr)
+
     async def run_mission_loop(self):
         """Connects to the MCP server and runs the autonomous mission loop."""
         print("Starting SENTINEL Agent Orchestrator...", file=sys.stderr)
@@ -211,12 +258,14 @@ class AgentOrchestrator:
 
                 agent_executor = None
                 if self.llm_active:
-                    token_handler_ref = None
                     agent_executor = create_react_agent(self.llm, tools)
 
                 async with aiohttp.ClientSession() as http_session:
-                    token_handler = TokenStreamHandler(self._broadcast_log, http_session)
+                    token_handler = TokenStreamHandler(
+                        self._broadcast_log, self._stream_log, http_session
+                    )
                     tick = 0
+                    mission_complete_logged = False
 
                     while True:
                         tick += 1
@@ -236,11 +285,14 @@ class AgentOrchestrator:
 
                         print(f"\n--- SENTINEL Tick {tick} ---", file=sys.stderr)
 
+                        # ── MISSION COMPLETE: recall swarm, stop loop ────────
                         if "MISSION COMPLETE" in poll_text:
-                            await self._broadcast_log(http_session, f"[SENTINEL] {poll_text}")
-                            print(f"[SENTINEL] {poll_text}", file=sys.stderr)
-                            await asyncio.sleep(5.0)
-                            continue
+                            if not mission_complete_logged:
+                                mission_complete_logged = True
+                                await self._broadcast_log(http_session,
+                                    "🏁 MISSION COMPLETE — All survivors found. Recalling swarm to base.")
+                                await self._recall_all_drones(session, http_session)
+                            break
 
                         # Reset memory on mission start
                         if "MISSION START" in poll_text:
@@ -273,8 +325,17 @@ class AgentOrchestrator:
                                         for tc in latest_msg.tool_calls:
                                             print(f"  [CMD] {tc['name']}({tc['args']})", file=sys.stderr)
                                     elif latest_msg.type == "tool":
-                                        print(f"  [RES] {latest_msg.content[:80]}", file=sys.stderr)
-                                        await self._broadcast_log(http_session, f"[SYSTEM] {latest_msg.content}")
+                                        content = latest_msg.content
+                                        if isinstance(content, list):
+                                            text = " ".join(
+                                                c.get("text", str(c)) for c in content if isinstance(c, dict)
+                                            )
+                                        else:
+                                            text = str(content)
+                                        print(f"  [RES] {text[:80]}", file=sys.stderr)
+                                        # Only broadcast tool errors — backend logs successful dispatches
+                                        if text.lower().startswith("error:"):
+                                            await self._broadcast_log(http_session, f"⚠️ {text}")
 
                                 # Extract and store memory events from this tick
                                 new_events = self._extract_memory_events(messages, tick)
@@ -313,6 +374,8 @@ class AgentOrchestrator:
 
                         print("-" * 30, file=sys.stderr)
                         await asyncio.sleep(0.5)
+
+        print("[SENTINEL] Agent loop exited.", file=sys.stderr)
 
     async def _execute_rule_based(self, session, poll_text: str):
         """Execute rule-based assignments directly via MCP."""

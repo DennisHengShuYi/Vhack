@@ -278,9 +278,11 @@ class SimulationState:
         self.mission_log: List[Dict] = []
         self.mission_active = False
         self.mission_start_time: Optional[float] = None
+        self.mission_end_time: Optional[float] = None
         self.total_victims_found = 0
         self.total_rescued = 0
         self._log_id = 0
+        self.streaming_text: str = ""  # Live LLM token buffer for real-time frontend display
 
     def _sample_unique_points(self, count: int) -> List[tuple]:
         cells = [(x, y) for y in range(GRID_H) for x in range(GRID_W)]
@@ -416,6 +418,9 @@ class SimulationState:
                 else:
                     xs = range(start_x, end_x + 1) if rev_x else range(end_x, start_x - 1, -1)
                 for x in xs:
+                    # Skip already-scanned cells — drone scans opportunistically while transiting
+                    if self.zone.scanned_cells[y][x]:
+                        continue
                     if not drone.path_queue or drone.path_queue[-1] != [x, y]:
                         drone.path_queue.append([x, y])
 
@@ -428,7 +433,9 @@ class SimulationState:
         mt = self.mission_start_time
         if mt is None:
             return "T+00:00"
-        e = int(time.time() - float(mt))
+        # Freeze at end time once mission is complete
+        end = self.mission_end_time if self.mission_end_time else time.time()
+        e = int(end - float(mt))
         m, s = divmod(e, 60)
         return f"T+{m:02d}:{s:02d}"
 
@@ -652,6 +659,7 @@ class SimulationState:
             "zone": self.zone.model_dump(),
             "log": self.mission_log,
             "base_station": {"x": self.base_station[0], "y": self.base_station[1]},
+            "streaming_text": self.streaming_text,
             "stats": {
                 "coverage_pct": coverage,
                 "total_victims": len(self.zone.survivors),

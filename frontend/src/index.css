@@ -117,3 +117,161 @@ h1, h2, h3, .font-mono {
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.2);
 }
+
+/* ─── Log Panel ────────────────────────────────────────────────────────────── */
+.log-entry {
+  padding: 0.55rem 0.7rem;
+  border-radius: 6px;
+  border-left: 3px solid transparent;
+  background: rgba(255,255,255,0.02);
+  font-size: 0.78rem;
+  line-height: 1.55;
+  word-break: break-word;
+  margin-bottom: 2px;
+}
+.log-entry.ai  { border-left-color: var(--accent-cyan); background: rgba(0,243,255,0.04); }
+.log-entry.info { border-left-color: rgba(255,255,255,0.18); }
+.log-entry.warn, .log-entry.warning { border-left-color: var(--accent-amber); background: rgba(255,179,0,0.05); }
+.log-entry.error { border-left-color: var(--accent-red); background: rgba(255,61,61,0.05); }
+.log-entry.victim_found, .log-entry.success { border-left-color: var(--accent-success); background: rgba(0,255,136,0.04); }
+
+.ai-log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+.ai-log-label {
+  font-family: 'Orbitron', sans-serif;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--accent-cyan);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.log-ts  { font-size: 0.62rem; opacity: 0.45; font-family: monospace; }
+.log-drone { font-size: 0.65rem; color: var(--accent-amber); margin-right: 4px; }
+.log-text strong { color: var(--accent-cyan); }
+
+.scroll-to-latest-btn {
+  position: sticky;
+  bottom: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0,243,255,0.15);
+  border: 1px solid var(--accent-cyan);
+  color: var(--accent-cyan);
+  border-radius: 20px;
+  padding: 4px 14px;
+  font-size: 0.72rem;
+  cursor: pointer;
+  font-family: 'Orbitron', sans-serif;
+  z-index: 10;
+  display: block;
+  width: max-content;
+  margin: 4px auto;
+}
+
+/* ─── Streaming Entry ──────────────────────────────────────────────────────── */
+.streaming-entry {
+  border-left-color: var(--accent-cyan) !important;
+  background: rgba(0,243,255,0.07) !important;
+  animation: stream-glow 1.5s ease-in-out infinite alternate;
+}
+@keyframes stream-glow {
+  from { box-shadow: inset 0 0 0 rgba(0,243,255,0); }
+  to   { box-shadow: inset 0 0 10px rgba(0,243,255,0.1); }
+}
+.streaming-label { gap: 8px; }
+.streaming-dot {
+  display: inline-block;
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--accent-cyan);
+  animation: dot-pulse 0.8s ease-in-out infinite alternate;
+}
+@keyframes dot-pulse {
+  from { opacity: 1; transform: scale(1); }
+  to   { opacity: 0.3; transform: scale(0.7); }
+}
+.streaming-body { opacity: 0.92; }
+.streaming-cursor {
+  display: inline-block;
+  width: 2px; height: 0.85em;
+  background: var(--accent-cyan);
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: blink 0.7s step-end infinite;
+}
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+/* ─── Structured Log Text ──────────────────────────────────────────────────── */
+.structured-log { display: flex; flex-direction: column; gap: 2px; }
+.log-spacer { height: 4px; }
+
+.slog-drone-header {
+  font-family: 'Orbitron', sans-serif;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--accent-cyan);
+  margin: 6px 0 2px;
+  padding: 3px 6px;
+  background: rgba(0,243,255,0.08);
+  border-radius: 4px;
+  letter-spacing: 0.04em;
+}
+
+.slog-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.pulse-row { margin-top: 6px; padding-top: 4px; border-top: 1px solid rgba(255,255,255,0.06); }
+
+.slog-badge {
+  font-family: 'Orbitron', sans-serif;
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 1px 6px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.slog-badge.tradeoff { background: rgba(255,179,0,0.15); color: var(--accent-amber); border: 1px solid rgba(255,179,0,0.3); }
+.slog-badge.decision { background: rgba(0,255,136,0.12); color: var(--accent-success); border: 1px solid rgba(0,255,136,0.3); }
+.slog-badge.pulse    { background: rgba(0,243,255,0.12); color: var(--accent-cyan);    border: 1px solid rgba(0,243,255,0.25); }
+
+.slog-zone {
+  font-family: 'Orbitron', sans-serif;
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: var(--accent-success);
+  background: rgba(0,255,136,0.1);
+  border: 1px solid rgba(0,255,136,0.25);
+  border-radius: 3px;
+  padding: 0px 5px;
+}
+
+.slog-text { opacity: 0.85; line-height: 1.45; flex: 1; min-width: 0; }
+.slog-plain { opacity: 0.8; }
+
+/* System message rows */
+.slog-system {
+  font-family: 'Orbitron', sans-serif;
+  font-size: 0.65rem;
+  padding: 3px 6px;
+  border-radius: 3px;
+  margin: 1px 0;
+}
+.slog-system.auto     { color: var(--accent-cyan);    background: rgba(0,243,255,0.07); }
+.slog-system.routing  { color: var(--accent-success);  background: rgba(0,255,136,0.05); }
+.slog-system.rtb      { color: var(--accent-amber);   background: rgba(255,179,0,0.06); }
+.slog-system.complete { color: var(--accent-success);  background: rgba(0,255,136,0.1); font-weight: 700; }
+.slog-system.warn     { color: var(--accent-red);     background: rgba(255,61,61,0.07); }
+.slog-system.dispatch { color: var(--accent-cyan);    background: rgba(0,243,255,0.07); }

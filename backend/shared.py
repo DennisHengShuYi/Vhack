@@ -4,4 +4,4 @@ so they always reference the same SimulationState instance.
 """
 from simulation import SimulationState
 
-sim = SimulationState()
+sim = SimulationState(num_victims=10)  # Match frontend default

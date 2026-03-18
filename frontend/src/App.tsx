@@ -33,6 +33,101 @@ const LOW_BATTERY_PCT = 25;
 
 // --- Components ---
 
+/** Renders a single line of AI reasoning with structured highlight labels */
+function StructuredLogText({ text }: { text: string }) {
+  const lines = text.split('\n');
+  return (
+    <div className="structured-log">
+      {lines.map((line, i) => {
+        const t = line.trim();
+        if (!t) return <div key={i} className="log-spacer" />;
+
+        // DRONE header line
+        if (/^DRONE\s+\S+\s+@/.test(t)) {
+          return <div key={i} className="slog-drone-header">{t}</div>;
+        }
+        // TRADEOFF line
+        if (t.startsWith('TRADEOFF:')) {
+          return (
+            <div key={i} className="slog-row">
+              <span className="slog-badge tradeoff">TRADEOFF</span>
+              <span className="slog-text">{t.slice('TRADEOFF:'.length).trim()}</span>
+            </div>
+          );
+        }
+        // DECISION line
+        if (t.startsWith('DECISION →') || t.startsWith('DECISION →')) {
+          const zoneMatch = t.match(/→\s*(\w+)\s*[:\-]/);
+          const zone = zoneMatch ? zoneMatch[1] : '';
+          const rest = t.replace(/^DECISION\s*→\s*\w+\s*[:\-]?\s*/, '');
+          return (
+            <div key={i} className="slog-row">
+              <span className="slog-badge decision">DECISION</span>
+              {zone && <span className="slog-zone">{zone}</span>}
+              <span className="slog-text">{rest}</span>
+            </div>
+          );
+        }
+        // MISSION PULSE line
+        if (t.startsWith('MISSION PULSE:')) {
+          return (
+            <div key={i} className="slog-row pulse-row">
+              <span className="slog-badge pulse">PULSE</span>
+              <span className="slog-text">{t.slice('MISSION PULSE:'.length).trim()}</span>
+            </div>
+          );
+        }
+        // System badges: [AUTO], [ROUTING], [RTB], [SENTINEL], ⚠️, 🏁, 📡
+        if (t.startsWith('[AUTO]')) return <div key={i} className="slog-system auto">{t}</div>;
+        if (t.startsWith('[ROUTING]')) return <div key={i} className="slog-system routing">{t}</div>;
+        if (t.startsWith('[RTB]')) return <div key={i} className="slog-system rtb">{t}</div>;
+        if (t.startsWith('[SENTINEL]') || t.startsWith('🏁')) return <div key={i} className="slog-system complete">{t}</div>;
+        if (t.startsWith('⚠️')) return <div key={i} className="slog-system warn">{t}</div>;
+        if (t.startsWith('📡')) return <div key={i} className="slog-system dispatch">{t}</div>;
+        if (t.startsWith('🔁')) return <div key={i} className="slog-system rtb">{t}</div>;
+
+        // Default: render with **bold** markdown
+        return (
+          <div key={i} className="slog-plain" dangerouslySetInnerHTML={{
+            __html: t
+              .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+          }} />
+        );
+      })}
+    </div>
+  );
+}
+
+/** Single log entry card */
+function LogEntry({ entry }: { entry: any }) {
+  const isAi = entry.level?.toLowerCase() === 'ai';
+  return (
+    <div className={`log-entry ${entry.level?.toLowerCase() ?? ''}`}>
+      {isAi ? (
+        <>
+          <div className="ai-log-header">
+            <span className="ai-log-label">⬡ SENTINEL AI</span>
+            <span className="log-ts">{entry.ts}</span>
+          </div>
+          <div className="ai-log-body">
+            <StructuredLogText text={entry.text || ""} />
+          </div>
+        </>
+      ) : (
+        <>
+          <span className="log-ts">[{entry.ts}]</span>
+          {entry.drone && <span className="log-drone">[{entry.drone}]</span>}
+          <span className="log-text" dangerouslySetInnerHTML={{
+            __html: (entry.text || "")
+              .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+              .replace(/\n/g, '<br />')
+          }} />
+        </>
+      )}
+    </div>
+  );
+}
+
 /**
  * Main Sentinel Mission Dashboard
  */
@@ -49,6 +144,9 @@ export default function App() {
   const [victimCount, setVictimCount] = useState(10);
   const [showAssumptions, setShowAssumptions] = useState(false);
 
+  const [wsStreamText, setWsStreamText] = useState("");
+  const wsRef = useRef<WebSocket | null>(null);
+
   const logEndRef = useRef<HTMLDivElement>(null);
   const logScrollRef = useRef<HTMLDivElement>(null);
   const [userScrolledUp, setUserScrolledUp] = useState(false);
@@ -63,12 +161,44 @@ export default function App() {
     }
   }, [state]);
 
+  // WebSocket connection for live agent token streaming
+  useEffect(() => {
+    const WS_URL = API_BASE.replace(/^http/, 'ws') + '/ws/stream';
+    let ws: WebSocket;
+    let reconnectTimer: ReturnType<typeof setTimeout>;
+
+    const connect = () => {
+      ws = new WebSocket(WS_URL);
+      wsRef.current = ws;
+
+      ws.onmessage = (event) => {
+        setWsStreamText(event.data);
+      };
+
+      ws.onclose = () => {
+        // Auto-reconnect after 2s
+        reconnectTimer = setTimeout(connect, 2000);
+      };
+
+      ws.onerror = () => {
+        ws.close();
+      };
+    };
+
+    connect();
+
+    return () => {
+      clearTimeout(reconnectTimer);
+      ws?.close();
+    };
+  }, []);
+
   // Auto-scroll log to bottom when new entries arrive (unless user scrolled up)
   useEffect(() => {
-    if (!userScrolledUp && logEndRef.current) {
-      logEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    if (!userScrolledUp && logScrollRef.current) {
+      logScrollRef.current.scrollTop = logScrollRef.current.scrollHeight;
     }
-  }, [state, logFilter, userScrolledUp]);
+  }, [state, wsStreamText, logFilter, userScrolledUp]);
 
   // Poll state every 800ms
   useEffect(() => {
@@ -187,6 +317,8 @@ export default function App() {
   if (isLoading) return <div className="loading-container"><Zap className="animate-pulse" /> INITIALIZING SENTINEL...</div>;
 
   const { stats, drones, zone, log, base_station } = state || {};
+  // Prefer live WebSocket stream; fall back to polling value if WS not yet connected
+  const streaming_text = wsStreamText || state?.streaming_text || "";
   const baseX = base_station?.x ?? 0;
   const baseY = base_station?.y ?? 0;
 const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
@@ -462,7 +594,7 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
               <button
                 className="scroll-to-latest-btn"
                 onClick={() => {
-                  logEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+                  if (logScrollRef.current) logScrollRef.current.scrollTop = logScrollRef.current.scrollHeight;
                   setUserScrolledUp(false);
                 }}
               >
@@ -470,35 +602,27 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
               </button>
             )}
             <div className="mission-log font-mono">
-              {filteredLog.length === 0 && (
+              {filteredLog.length === 0 && !streaming_text && (
                 <div className="log-empty"><Cpu size={20} className="animate-pulse" /><span>Awaiting SENTINEL activity...</span></div>
               )}
-              {filteredLog.map((entry: any) => {
-                const isAi = entry.level?.toLowerCase() === 'ai';
-                return (
-                  <div key={entry.id} className={`log-entry ${entry.level.toLowerCase()}`}>
-                    {isAi ? (
-                      <>
-                        <div className="ai-log-header">
-                          <span className="ai-log-label">⬡ SENTINEL AI</span>
-                          <span className="log-ts">{entry.ts}</span>
-                        </div>
-                        <div className="ai-log-body">{entry.text || ""}</div>
-                      </>
-                    ) : (
-                      <>
-                        <span className="log-ts">[{entry.ts}]</span>
-                        {entry.drone && <span className="log-drone">[{entry.drone}]</span>}
-                        <span className="log-text" dangerouslySetInnerHTML={{
-                          __html: (entry.text || "")
-                            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-                            .replace(/\n/g, '<br />')
-                        }}></span>
-                      </>
-                    )}
+              {filteredLog.map((entry: any) => (
+                <LogEntry key={entry.id} entry={entry} />
+              ))}
+              {/* Live streaming card — shows LLM tokens as they arrive */}
+              {streaming_text && (
+                <div className="log-entry ai streaming-entry">
+                  <div className="ai-log-header">
+                    <span className="ai-log-label streaming-label">
+                      <span className="streaming-dot" />
+                      ⬡ SENTINEL AI — REASONING
+                    </span>
                   </div>
-                );
-              })}
+                  <div className="ai-log-body streaming-body">
+                    <StructuredLogText text={streaming_text} />
+                    <span className="streaming-cursor" />
+                  </div>
+                </div>
+              )}
               <div ref={logEndRef} />
             </div>
           </div>
@@ -910,6 +1034,71 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
         .log-entry.warn { color: #ffb300; opacity: 0.9; }
         .log-entry.error { color: #ff3d3d; font-weight: bold; background: rgba(255, 61, 61, 0.1); padding: 2px 4px; }
         .log-entry.success { color: #00ff88; text-shadow: 0 0 5px rgba(0, 255, 136, 0.3); }
+        .log-empty { display: flex; flex-direction: column; align-items: center; gap: 10px; opacity: 0.35; padding: 2rem; font-family: 'Orbitron', sans-serif; font-size: 0.75rem; }
+
+        /* ── Streaming Entry ── */
+        .streaming-entry {
+          border-left-color: #a5f3fc !important;
+          background: rgba(165,243,252,0.08) !important;
+          animation: stream-glow 1.5s ease-in-out infinite alternate;
+        }
+        @keyframes stream-glow {
+          from { box-shadow: none; }
+          to   { box-shadow: 0 0 12px rgba(165,243,252,0.15); }
+        }
+        .streaming-label { display: flex; align-items: center; gap: 8px; }
+        .streaming-dot {
+          display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+          background: #a5f3fc;
+          animation: dot-pulse 0.8s ease-in-out infinite alternate;
+        }
+        @keyframes dot-pulse {
+          from { opacity: 1; transform: scale(1); }
+          to   { opacity: 0.3; transform: scale(0.7); }
+        }
+        .streaming-body { opacity: 0.92; }
+        .streaming-cursor {
+          display: inline-block; width: 2px; height: 0.9em;
+          background: #a5f3fc; margin-left: 2px; vertical-align: text-bottom;
+          animation: blink 0.7s step-end infinite;
+        }
+        @keyframes blink { 50% { opacity: 0; } }
+
+        /* ── Structured Log Text ── */
+        .structured-log { display: flex; flex-direction: column; gap: 2px; }
+        .log-spacer { height: 5px; }
+        .slog-drone-header {
+          font-family: 'Orbitron', sans-serif; font-size: 0.67rem; font-weight: 700;
+          color: #a5f3fc; margin: 7px 0 3px;
+          padding: 3px 7px; background: rgba(165,243,252,0.08); border-radius: 4px;
+          letter-spacing: 0.04em;
+        }
+        .slog-row { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+        .pulse-row { margin-top: 7px; padding-top: 5px; border-top: 1px solid rgba(165,243,252,0.1); }
+        .slog-badge {
+          font-family: 'Orbitron', sans-serif; font-size: 0.57rem; font-weight: 700;
+          letter-spacing: 0.06em; padding: 1px 6px; border-radius: 3px; flex-shrink: 0; white-space: nowrap;
+        }
+        .slog-badge.tradeoff { background: rgba(255,179,0,0.13); color: #ffb300; border: 1px solid rgba(255,179,0,0.28); }
+        .slog-badge.decision { background: rgba(0,255,136,0.1); color: #00ff88; border: 1px solid rgba(0,255,136,0.28); }
+        .slog-badge.pulse    { background: rgba(165,243,252,0.1); color: #a5f3fc; border: 1px solid rgba(165,243,252,0.22); }
+        .slog-zone {
+          font-family: 'Orbitron', sans-serif; font-size: 0.65rem; font-weight: 700;
+          color: #00ff88; background: rgba(0,255,136,0.09);
+          border: 1px solid rgba(0,255,136,0.22); border-radius: 3px; padding: 0 5px;
+        }
+        .slog-text { opacity: 0.82; line-height: 1.45; flex: 1; min-width: 0; }
+        .slog-plain { opacity: 0.78; }
+        .slog-system {
+          font-family: 'Orbitron', sans-serif; font-size: 0.64rem;
+          padding: 2px 7px; border-radius: 3px; margin: 1px 0;
+        }
+        .slog-system.auto     { color: #a5f3fc; background: rgba(165,243,252,0.07); }
+        .slog-system.routing  { color: #00ff88; background: rgba(0,255,136,0.06); }
+        .slog-system.rtb      { color: #ffb300; background: rgba(255,179,0,0.06); }
+        .slog-system.complete { color: #00ff88; background: rgba(0,255,136,0.1); font-weight: 700; }
+        .slog-system.warn     { color: #ff3d3d; background: rgba(255,61,61,0.07); }
+        .slog-system.dispatch { color: #a5f3fc; background: rgba(165,243,252,0.07); }
 
         .center-map { display: flex; flex-direction: column; position: relative; padding: 1rem; }
         .map-overlay-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
