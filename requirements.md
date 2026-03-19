@@ -1,5 +1,5 @@
 # VHack 2026 — Case Study 3
-# First Responder of the Future: Decentralised Swarm Intelligence
+#  RescueSwarm — AI Drone Search & Rescue Simulation
 # Complete Project Requirements & Specification
 
 ---
@@ -613,7 +613,7 @@ Three-column layout with a fixed HUD header:
 ### 10.2 HUD Header
 | Element | Description |
 |---|---|
-| Brand / Connection status | SENTINEL COMMAND logo + ONLINE/OFFLINE indicator |
+| Brand / Connection status | RESCUE SWARM logo + ONLINE/OFFLINE indicator |
 | Coverage % | Scanned cells / total accessible cells |
 | Found counter | Victims found / total |
 | Rescued counter | Successfully extracted victims |
