@@ -192,7 +192,7 @@ Vhack/
 ### Step 1 — Clone the Repository
 
 ```bash
-git clone https://github.com/DennisHengShuYi/Vhack.git
+git clone https://github.com/DennisHengShuYi/RescueSwarm.git
 cd Vhack
 ```
 
