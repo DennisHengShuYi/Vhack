@@ -132,8 +132,8 @@ function LogEntry({ entry }: { entry: any }) {
 // ─── Triage CSS class helper ────────────────────────────────────────────────
 function triageCssClass(triage: string): string {
   if (triage === "P1-CRITICAL") return "p1_critical";
-  if (triage === "P2-URGENT")   return "p2_urgent";
-  if (triage === "P3-STABLE")   return "p3_stable";
+  if (triage === "P2-URGENT") return "p2_urgent";
+  if (triage === "P3-STABLE") return "p3_stable";
   return "p3_stable";
 }
 
@@ -149,8 +149,8 @@ function VictimListPanel({
 }) {
   const TRIAGE_ORDER: Record<string, number> = {
     "P1-CRITICAL": 0,
-    "P2-URGENT":   1,
-    "P3-STABLE":   2,
+    "P2-URGENT": 1,
+    "P3-STABLE": 2,
   };
 
   const sorted = [...survivors]
@@ -475,7 +475,7 @@ export default function App() {
   const streaming_text = wsStreamText || state?.streaming_text || "";
   const baseX = base_station?.x ?? 0;
   const baseY = base_station?.y ?? 0;
-const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
+  const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
   const isReturningDrone = (drone: any) =>
     drone?.returning_to_base ||
     String(drone?.status_label || '').toLowerCase().includes('rtb') ||
@@ -493,13 +493,8 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
         <div className="brand">
           <Shield className="brand-logo" />
           <div className="brand-text">
-<<<<<<< HEAD
             <h1>RescueSwarm</h1>
             <span className="subtitle">AI Drone Search & Rescue Simulation</span>
-=======
-            <h1>RESCUE SWARM</h1>
-            <span className="subtitle">First Responder Swarm Intelligence v2.0.0</span>
->>>>>>> 6b93e1abd8c3329dd18bf63253404734fb1243ba
           </div>
         </div>
 
@@ -583,56 +578,56 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
             {leftTab === 'victims' ? (
               <VictimListPanel survivors={zone?.survivors || []} highlighted={highlightedVictim} onSelect={setHighlightedVictim} />
             ) : (
-            <div className="drone-list">
-              {displayedDrones.map((drone: any) => {
-                const isOffline = !drone.is_active;
-                return (
-                <motion.div
-                  key={drone.id}
-                  className={`drone-card ${activeDroneId === drone.id ? 'active' : ''} ${drone.is_waiting_response ? 'alert' : ''} ${isOffline ? 'offline' : ''}`}
-                  whileHover={{ scale: 1.02 }}
-                  onClick={() => setActiveDroneId(drone.id)}
-                >
-                  <div className="drone-card-header">
-                    <div className="flex-row gap-2 items-center">
-                      <span className={`heartbeat-dot ${isOffline ? 'offline' : 'online'}`} title={isOffline ? 'No signal' : 'Connected'} />
-                      <span className="drone-id font-mono">{drone.id}</span>
-                    </div>
-                    <div className="flex-row gap-2 items-center">
-                      <span className="text-xs opacity-60">{drone.battery.toFixed(0)}%</span>
-                      <div className={`status-dot ${drone.status_label.toLowerCase().replace(/ /g, '-')}`}></div>
-                    </div>
-                  </div>
-                  {isOffline ? (
-                    <div className="drone-offline-body">
-                      <WifiOff size={18} className="offline-icon" />
-                      <span className="offline-label">AWAITING HEARTBEAT</span>
-                      <span className="offline-sublabel">Joining swarm mesh network…</span>
-                    </div>
-                  ) : (
-                  <div className="drone-card-body">
-                    <div className="drone-telemetry">
-                      <div className="tel-row">
-                        <Battery size={14} />
-                        <div className="battery-bar-container">
-                          <div className={`battery-fill ${drone.battery < LOW_BATTERY_PCT ? 'critical' : ''}`} style={{ width: `${drone.battery}%` }}></div>
+              <div className="drone-list">
+                {displayedDrones.map((drone: any) => {
+                  const isOffline = !drone.is_active;
+                  return (
+                    <motion.div
+                      key={drone.id}
+                      className={`drone-card ${activeDroneId === drone.id ? 'active' : ''} ${drone.is_waiting_response ? 'alert' : ''} ${isOffline ? 'offline' : ''}`}
+                      whileHover={{ scale: 1.02 }}
+                      onClick={() => setActiveDroneId(drone.id)}
+                    >
+                      <div className="drone-card-header">
+                        <div className="flex-row gap-2 items-center">
+                          <span className={`heartbeat-dot ${isOffline ? 'offline' : 'online'}`} title={isOffline ? 'No signal' : 'Connected'} />
+                          <span className="drone-id font-mono">{drone.id}</span>
                         </div>
-                        <span className="font-mono text-xs">{drone.battery.toFixed(0)}%</span>
+                        <div className="flex-row gap-2 items-center">
+                          <span className="text-xs opacity-60">{drone.battery.toFixed(0)}%</span>
+                          <div className={`status-dot ${drone.status_label.toLowerCase().replace(/ /g, '-')}`}></div>
+                        </div>
                       </div>
-                      <div className="tel-row">
-                        <Navigation size={14} />
-                        <span className="font-mono text-xs">({drone.x}, {drone.y}) · {drone.terrain?.toUpperCase() ?? 'N/A'}</span>
-                      </div>
-                      <div className={`status-chip ${drone.status_label.toLowerCase().replace(/ /g, '-').replace(/[^a-z0-9-]/g, '')}`}>
-                        {drone.status_label}
-                      </div>
-                    </div>
-                  </div>
-                  )}
-                </motion.div>
-                );
-              })}
-            </div>
+                      {isOffline ? (
+                        <div className="drone-offline-body">
+                          <WifiOff size={18} className="offline-icon" />
+                          <span className="offline-label">AWAITING HEARTBEAT</span>
+                          <span className="offline-sublabel">Joining swarm mesh network…</span>
+                        </div>
+                      ) : (
+                        <div className="drone-card-body">
+                          <div className="drone-telemetry">
+                            <div className="tel-row">
+                              <Battery size={14} />
+                              <div className="battery-bar-container">
+                                <div className={`battery-fill ${drone.battery < LOW_BATTERY_PCT ? 'critical' : ''}`} style={{ width: `${drone.battery}%` }}></div>
+                              </div>
+                              <span className="font-mono text-xs">{drone.battery.toFixed(0)}%</span>
+                            </div>
+                            <div className="tel-row">
+                              <Navigation size={14} />
+                              <span className="font-mono text-xs">({drone.x}, {drone.y}) · {drone.terrain?.toUpperCase() ?? 'N/A'}</span>
+                            </div>
+                            <div className={`status-chip ${drone.status_label.toLowerCase().replace(/ /g, '-').replace(/[^a-z0-9-]/g, '')}`}>
+                              {drone.status_label}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </motion.div>
+                  );
+                })}
+              </div>
             )}
           </div>
         </section>
