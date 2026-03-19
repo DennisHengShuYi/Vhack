@@ -270,7 +270,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="RescueSwarm API",
-    description="First Responder Swarm Intelligence — MCP + FastAPI",
+    description="AI Drone Search & Rescue Simulation — MCP + FastAPI",
     version="2.0.0",
     lifespan=lifespan,
 )

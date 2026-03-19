@@ -493,8 +493,8 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
         <div className="brand">
           <Shield className="brand-logo" />
           <div className="brand-text">
-            <h1>SENTINEL COMMAND</h1>
-            <span className="subtitle">First Responder Swarm Intelligence v2.0.0</span>
+            <h1>RescueSwarm</h1>
+            <span className="subtitle">AI Drone Search & Rescue Simulation</span>
           </div>
         </div>
 
