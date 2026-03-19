@@ -1,5 +1,5 @@
 # VHack 2026 — Case Study 3
-# First Responder of the Future: Decentralised Swarm Intelligence
+#  RescueSwarm — AI Drone Search & Rescue Simulation
 # Complete Project Requirements & Specification
 
 ---
