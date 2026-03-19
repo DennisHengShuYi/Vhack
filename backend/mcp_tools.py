@@ -568,7 +568,7 @@ def register_tools(mcp):
             sim.release_zone(zid)
             drone.assigned_zone_id = None
 
-        drone.path_queue = []
+        drone.path_queue = sim.compute_path(drone.x, drone.y, base_x, base_y)
         drone.target_x, drone.target_y = base_x, base_y
         drone.returning_to_base = True
         drone.status = "RETURNING"

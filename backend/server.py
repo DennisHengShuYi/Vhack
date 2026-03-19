@@ -34,7 +34,7 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 import shared
-from simulation import SimulationState, ZoneStatus, chebyshev, LOW_BATTERY_THRESHOLD, BATTERY_RETURN_RESERVE
+from simulation import SimulationState, ZoneStatus, chebyshev, LOW_BATTERY_THRESHOLD, BATTERY_RETURN_RESERVE, GRID_W, GRID_H
 
 # ─── FastMCP Server ────────────────────────────────────────────────────────────
 mcp = FastMCP("DroneCommandServer")
@@ -90,6 +90,7 @@ async def run_simulation_loop():
                 for drone in sim.drones.values():
                     drone.base_x, drone.base_y = base_x, base_y
                     if (drone.x, drone.y) != (base_x, base_y):
+                        drone.path_queue = sim.compute_path(drone.x, drone.y, base_x, base_y)
                         drone.target_x, drone.target_y = base_x, base_y
                         drone.returning_to_base = True
                         drone.mission_complete_rtb = True
@@ -168,6 +169,16 @@ async def run_simulation_loop():
                             nx += 1 if tx > nx else -1
                         if ny != ty:
                             ny += 1 if ty > ny else -1
+                        # Safety: if direct step lands on a hazard (lake), try axis-only moves
+                        if sim.zone.hazard_cells[ny][nx] and not (nx == tx and ny == ty):
+                            ax = drone.x + (1 if tx > drone.x else -1 if tx < drone.x else 0)
+                            bx, by = drone.x, drone.y + (1 if ty > drone.y else -1 if ty < drone.y else 0)
+                            if 0 <= ax < GRID_W and not sim.zone.hazard_cells[drone.y][ax]:
+                                nx, ny = ax, drone.y
+                            elif 0 <= by < GRID_H and not sim.zone.hazard_cells[by][bx]:
+                                nx, ny = bx, by
+                            else:
+                                nx, ny = drone.x, drone.y  # fully blocked — stay put
 
                     # Arrived at current step target
                     if drone.x == nx and drone.y == ny and not drone.path_queue:
@@ -233,7 +244,7 @@ async def run_simulation_loop():
                             sim.release_zone(zid)
                             sim.log(f"⚠️ {d_id} aborting zone {zid} — low battery. Residual path saved.", "WARN", d_id)
                             drone.assigned_zone_id = None
-                        drone.path_queue = []
+                        drone.path_queue = sim.compute_path(drone.x, drone.y, base_x, base_y)
                         drone.target_x, drone.target_y = base_x, base_y
                         drone.returning_to_base = True
                         drone.status = "RETURNING"
@@ -460,13 +471,10 @@ def _dispatch_drone_to_target(sim, tx: int, ty: int, reason: str,
     curr_x, curr_y = int(selected_drone.x), int(selected_drone.y)
     path: list[list[int]] = []
 
-    # Phase 1: diagonal transit to (tx, ty)
-    while (curr_x, curr_y) != (tx, ty):
-        if curr_x < tx:   curr_x += 1
-        elif curr_x > tx: curr_x -= 1
-        if curr_y < ty:   curr_y += 1
-        elif curr_y > ty: curr_y -= 1
-        path.append([curr_x, curr_y])
+    # Phase 1: BFS transit to (tx, ty) — avoids lake/hazard cells
+    transit = sim.compute_path(curr_x, curr_y, tx, ty)
+    path.extend(transit)
+    curr_x, curr_y = tx, ty
 
     # Phase 2: 3×3 box scan around (tx, ty) — 8 surrounding cells clockwise
     for dx, dy in [(-1,-1),(0,-1),(1,-1),(1,0),(1,1),(0,1),(-1,1),(-1,0)]:

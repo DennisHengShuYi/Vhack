@@ -19,6 +19,29 @@ LOW_BATTERY_THRESHOLD = 25.0  # % — recall threshold
 BATTERY_RETURN_RESERVE = 8.0  # % — emergency reserve after reaching base
 NUM_DRONES           = 5
 
+# ─── Victim Condition Constants ────────────────────────────────────────────────
+CONDITION_TRIAGE: Dict[str, str] = {
+    "CRITICAL_INJURY": "P1-CRITICAL",
+    "UNCONSCIOUS":     "P1-CRITICAL",
+    "CARDIAC_EVENT":   "P1-CRITICAL",
+    "MODERATE_INJURY": "P2-URGENT",
+    "TRAPPED_STABLE":  "P2-URGENT",
+    "DEHYDRATION":     "P2-URGENT",
+    "SHOCK":           "P2-URGENT",
+    "MINOR_INJURY":    "P3-STABLE",
+    "MOBILE_HEALTHY":  "P3-STABLE",
+}
+CONDITION_POOL = [
+    "CRITICAL_INJURY", "CRITICAL_INJURY", "CRITICAL_INJURY",
+    "UNCONSCIOUS",     "UNCONSCIOUS",
+    "CARDIAC_EVENT",
+    "MODERATE_INJURY", "MODERATE_INJURY",
+    "TRAPPED_STABLE",  "TRAPPED_STABLE",
+    "DEHYDRATION",     "SHOCK",
+    "MINOR_INJURY",    "MINOR_INJURY",
+    "MOBILE_HEALTHY",
+]
+
 class ZoneStatus(Enum):
     UNSCANNED = "UNSCANNED"
     IN_PROGRESS = "IN_PROGRESS"
@@ -244,6 +267,12 @@ class DisasterZone(BaseModel):
                     break
 
             for i, (sx, sy) in enumerate(seen_in_pool[:num]):
+                _cond = random.choice(CONDITION_POOL)
+                _can_move = (
+                    True if _cond == "MOBILE_HEALTHY"
+                    else random.choice([True, False]) if _cond == "MINOR_INJURY"
+                    else False
+                )
                 self.survivors.append({
                     "x": sx, "y": sy,
                     "report": random.choice(reports),
@@ -251,8 +280,9 @@ class DisasterZone(BaseModel):
                     "found": False,
                     "rescued": False,
                     "heat_intensity": random.randint(80, 98),
-                    "triage_priority": random.choice(["P1-CRITICAL", "P2-URGENT", "P3-STABLE"]),
-                    "can_move": random.choice([True, False, False]),
+                    "condition": _cond,
+                    "triage_priority": CONDITION_TRIAGE[_cond],
+                    "can_move": _can_move,
                     "notified_rescue": False,
                 })
 
@@ -417,29 +447,37 @@ class SimulationState:
 
         curr_x, curr_y = drone.x, drone.y
 
-        if (curr_x, curr_y) == (target_sx, target_sy):
-            new_queue.append([curr_x, curr_y])
+        # BFS transit to zone corner — avoids lake/hazard cells
+        transit = self.compute_path(curr_x, curr_y, target_sx, target_sy)
+        new_queue.extend(transit)
+        curr_x, curr_y = target_sx, target_sy
 
-        while (curr_x, curr_y) != (target_sx, target_sy):
-            if curr_x < target_sx: curr_x += 1
-            elif curr_x > target_sx: curr_x -= 1
-            if curr_y < target_sy: curr_y += 1
-            elif curr_y > target_sy: curr_y -= 1
-            new_queue.append([curr_x, curr_y])
+        def enqueue(cell_x: int, cell_y: int) -> None:
+            """Append [cell_x, cell_y] to new_queue.
+            If the last queued cell is more than 1 step away (gap from skipped cells),
+            route through intermediate cells via BFS so the drone never teleports."""
+            if not new_queue:
+                new_queue.append([cell_x, cell_y])
+            else:
+                px, py = new_queue[-1]
+                if chebyshev(px, py, cell_x, cell_y) > 1:
+                    new_queue.extend(self.compute_path(px, py, cell_x, cell_y))
+                elif [cell_x, cell_y] != [px, py]:
+                    new_queue.append([cell_x, cell_y])
 
         if zone.residual_path and len(zone.residual_path) > 0:
             # Resume from saved residual, skipping cells already scanned since the diversion
             for cell in zone.residual_path[1:]:
                 cx, cy = cell
-                if not self.zone.scanned_cells[cy][cx]:
-                    new_queue.append(cell)
+                if not self.zone.scanned_cells[cy][cx] and not self.is_inaccessible(cx, cy):
+                    enqueue(cx, cy)
             zone.residual_path = []
             # Full-zone sweep: catch any cells missed before the diversion started
             for sy in range(start_y, end_y + 1):
                 for sx in range(start_x, end_x + 1):
                     if not self.zone.scanned_cells[sy][sx] and not self.is_inaccessible(sx, sy):
                         if [sx, sy] not in new_queue:
-                            new_queue.append([sx, sy])
+                            enqueue(sx, sy)
         else:
             rev_x = (target_sx == end_x)
             rev_y = (target_sy == end_y)
@@ -453,8 +491,11 @@ class SimulationState:
                 else:
                     xs = range(start_x, end_x + 1) if rev_x else range(end_x, start_x - 1, -1)
                 for x in xs:
-                    if not new_queue or new_queue[-1] != [x, y]:
-                        new_queue.append([x, y])
+                    if self.is_inaccessible(x, y):
+                        continue
+                    if self.zone.scanned_cells[y][x]:
+                        continue  # skip already-scanned cells; enqueue() will route through them if needed
+                    enqueue(x, y)
 
         # path_queue is assigned FIRST so the tick loop never sees assigned_zone_id set
         # with an empty queue (which would falsely mark the zone COMPLETE).
@@ -566,7 +607,10 @@ class SimulationState:
             "found": False,
             "rescued": False,
             "heat_intensity": random.randint(85, 95),
-            "triage_priority": triage
+            "condition": "TRAPPED_STABLE",
+            "triage_priority": CONDITION_TRIAGE.get(triage, triage),
+            "can_move": False,
+            "notified_rescue": False,
         })
         self.log(f"NEW TARGET INTEL: Victim reported near ({x},{y}) - '{report}'", "INTEL")
         return f"Sector ({x},{y}) added to priority search queue."
@@ -640,6 +684,7 @@ class SimulationState:
                     "confidence": confidence,
                     "report": survivor["report"],
                     "triage": survivor["triage_priority"],
+                    "condition": survivor.get("condition", "UNKNOWN"),
                 }
                 if not survivor.get("notified_rescue"):
                     survivor["notified_rescue"] = True
@@ -706,6 +751,37 @@ class SimulationState:
         seconds = (unscanned / active_drones) * 1.5 * 0.7
         m, s = divmod(int(seconds), 60)
         return f"{m:02}m {s:02}s"
+
+    def compute_path(self, x0: int, y0: int, x1: int, y1: int) -> List[List[int]]:
+        """BFS shortest path from (x0,y0) to (x1,y1) using 8-directional movement,
+        avoiding hazard/lake cells. Used for all direct movement (RTB, voice dispatch)
+        so drones never cut through lake terrain."""
+        if x0 == x1 and y0 == y1:
+            return []
+        from collections import deque
+        visited: set = {(x0, y0)}
+        queue: deque = deque([(x0, y0, [])])
+        while queue:
+            cx, cy, path = queue.popleft()
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    if dx == 0 and dy == 0:
+                        continue
+                    nx, ny = cx + dx, cy + dy
+                    if (nx, ny) in visited:
+                        continue
+                    if nx < 0 or ny < 0 or nx >= GRID_W or ny >= GRID_H:
+                        continue
+                    # Block hazard cells except the destination (base is always clear)
+                    if self.zone.hazard_cells[ny][nx] and not (nx == x1 and ny == y1):
+                        continue
+                    new_path = path + [[nx, ny]]
+                    if nx == x1 and ny == y1:
+                        return new_path
+                    visited.add((nx, ny))
+                    queue.append((nx, ny, new_path))
+        # Fallback: direct step (grid should always be connected via non-lake cells)
+        return [[x1, y1]]
 
     def get_unscanned_cells(self) -> List[List[int]]:
         return [

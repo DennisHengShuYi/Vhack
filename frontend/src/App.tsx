@@ -12,14 +12,15 @@ import {
   Navigation,
   CheckCircle2,
   RefreshCcw,
-  Volume2,
   Send,
   Zap,
   Power,
   Wifi,
   WifiOff,
   Info,
-  X
+  X,
+  Mic,
+  Radio
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import Map3D from './components/Map3D';
@@ -128,6 +129,75 @@ function LogEntry({ entry }: { entry: any }) {
   );
 }
 
+// ─── Triage CSS class helper ────────────────────────────────────────────────
+function triageCssClass(triage: string): string {
+  if (triage === "P1-CRITICAL") return "p1_critical";
+  if (triage === "P2-URGENT")   return "p2_urgent";
+  if (triage === "P3-STABLE")   return "p3_stable";
+  return "p3_stable";
+}
+
+// ─── Victim List Panel ───────────────────────────────────────────────────────
+function VictimListPanel({
+  survivors,
+  highlighted,
+  onSelect,
+}: {
+  survivors: any[];
+  highlighted: { x: number; y: number } | null;
+  onSelect: (pos: { x: number; y: number } | null) => void;
+}) {
+  const TRIAGE_ORDER: Record<string, number> = {
+    "P1-CRITICAL": 0,
+    "P2-URGENT":   1,
+    "P3-STABLE":   2,
+  };
+
+  const sorted = [...survivors]
+    .filter(s => s.found)
+    .sort((a, b) => {
+      const ta = TRIAGE_ORDER[a.triage_priority] ?? 3;
+      const tb = TRIAGE_ORDER[b.triage_priority] ?? 3;
+      if (ta !== tb) return ta - tb;
+      if (a.rescued !== b.rescued) return a.rescued ? 1 : -1;
+      return 0;
+    });
+
+  if (sorted.length === 0) {
+    return (
+      <div className="victim-list-empty">
+        <Search size={22} style={{ opacity: 0.4 }} />
+        <span>No victims located yet</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="victim-list">
+      {sorted.map(v => {
+        const isHighlighted = highlighted?.x === v.x && highlighted?.y === v.y;
+        return (
+          <div
+            key={v.id}
+            className={`victim-item ${triageCssClass(v.triage_priority)}${v.rescued ? " rescued" : ""}${isHighlighted ? " map-highlighted" : ""}`}
+            onClick={() => onSelect(isHighlighted ? null : { x: v.x, y: v.y })}
+            title="Click to highlight on map"
+          >
+            <div className="victim-item-header">
+              <span className={`triage-badge ${triageCssClass(v.triage_priority)}`}>{v.triage_priority}</span>
+              <span className="victim-id">{v.id}</span>
+              <span className="victim-coord">({v.x},{v.y})</span>
+              {isHighlighted && <Crosshair size={11} style={{ marginLeft: 'auto', color: 'var(--accent-cyan)', opacity: 0.8 }} />}
+            </div>
+            <div className="victim-condition">{(v.condition ?? "UNKNOWN").replace(/_/g, " ")}</div>
+            <div className="victim-report-text">"{v.report}"</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /**
  * Main Sentinel Mission Dashboard
  */
@@ -143,6 +213,12 @@ export default function App() {
   const [is3DView, setIs3DView] = useState(false);
   const [victimCount, setVictimCount] = useState(10);
   const [showAssumptions, setShowAssumptions] = useState(false);
+  const [leftTab, setLeftTab] = useState<'fleet' | 'victims'>('fleet');
+  const [highlightedVictim, setHighlightedVictim] = useState<{ x: number; y: number } | null>(null);
+  const [missionComplete, setMissionComplete] = useState(false);
+  const celebrationFiredRef = useRef(false);
+  const celebrationCanvasRef = useRef<HTMLCanvasElement>(null);
+  const prevMissionActiveRef = useRef(false);
 
   const [wsStreamText, setWsStreamText] = useState("");
   const wsRef = useRef<WebSocket | null>(null);
@@ -153,13 +229,91 @@ export default function App() {
   const recognitionRef = useRef<any>(null);
   const autoRescuedRef = useRef<Set<string>>(new Set());
 
-  // Victim popup handling (auto-rescue removed)
+  // Victim popup handling + auto-switch to VICTIMS tab on detection
   useEffect(() => {
     const waiting = state?.drones?.find((d: any) => d.is_waiting_response);
     if (waiting) {
       setActiveDroneId(waiting.id);
+      setLeftTab('victims');
     }
   }, [state]);
+
+  // Mission completion detection
+  useEffect(() => {
+    const s = state?.stats;
+    if (!s) return;
+    const wasActive = prevMissionActiveRef.current;
+    prevMissionActiveRef.current = s.mission_active;
+
+    if (!s.mission_active) {
+      // Mission just stopped: celebrate only if all survivors were rescued
+      if (wasActive && !celebrationFiredRef.current && s.total_victims > 0 && s.victims_rescued === s.total_victims) {
+        celebrationFiredRef.current = true;
+        setMissionComplete(true);
+      }
+      return;
+    }
+    // Mission (re)started: clear any prior celebration and reset guard
+    if (s.victims_rescued === 0) {
+      celebrationFiredRef.current = false;
+      setMissionComplete(false);
+    }
+  }, [state]);
+
+  // Canvas particle celebration
+  useEffect(() => {
+    if (!missionComplete) return;
+    const canvas = celebrationCanvasRef.current;
+    if (!canvas) return;
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    const ctx = canvas.getContext('2d')!;
+
+    const COLORS = ['#00f3ff', '#00ff88', '#ffb300', '#ffffff', '#7dd3fc'];
+    interface Particle {
+      x: number; y: number; vx: number; vy: number;
+      w: number; h: number; color: string;
+      life: number; decay: number; rotation: number; rotSpeed: number;
+    }
+    const particles: Particle[] = Array.from({ length: 160 }, () => ({
+      x: Math.random() * canvas.width,
+      y: canvas.height + 10,
+      vx: (Math.random() - 0.5) * 5,
+      vy: -(Math.random() * 9 + 5),
+      w: Math.random() * 8 + 3,
+      h: Math.random() * 4 + 2,
+      color: COLORS[Math.floor(Math.random() * COLORS.length)],
+      life: 1,
+      decay: Math.random() * 0.008 + 0.004,
+      rotation: Math.random() * Math.PI * 2,
+      rotSpeed: (Math.random() - 0.5) * 0.18,
+    }));
+
+    let animId: number;
+    const animate = () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      let anyAlive = false;
+      for (const p of particles) {
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vy += 0.15; // gravity
+        p.life -= p.decay;
+        p.rotation += p.rotSpeed;
+        if (p.life <= 0) continue;
+        anyAlive = true;
+        ctx.save();
+        ctx.globalAlpha = p.life;
+        ctx.translate(p.x, p.y);
+        ctx.rotate(p.rotation);
+        ctx.fillStyle = p.color;
+        ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
+        ctx.restore();
+      }
+      if (anyAlive) animId = requestAnimationFrame(animate);
+    };
+    animate();
+    return () => cancelAnimationFrame(animId);
+  }, [missionComplete]);
 
   // WebSocket connection for live agent token streaming
   useEffect(() => {
@@ -396,18 +550,34 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
       {/* --- MAIN LAYOUT --- */}
       <main className="main-content">
 
-        {/* Left Side: Fleet Status */}
+        {/* Left Side: Fleet Status / Victims */}
         <section className="side-panel">
-          <div className="panel-section-header glass">
-            <Activity size={14} /> FLEET STATUS
-            <div className="fleet-controls">
+          {/* Tab switcher */}
+          <div className="left-tab-bar glass">
+            <button className={`left-tab-btn ${leftTab === 'fleet' ? 'active' : ''}`} onClick={() => setLeftTab('fleet')}>
+              <Activity size={12} /> FLEET
+              <span className="tab-count">{(drones || []).length}</span>
+            </button>
+            <button className={`left-tab-btn ${leftTab === 'victims' ? 'active' : ''}`} onClick={() => setLeftTab('victims')}>
+              <AlertTriangle size={12} /> VICTIMS
+              <span className={`tab-count ${(zone?.survivors || []).filter((s: any) => s.found && !s.rescued).length > 0 ? 'urgent' : ''}`}>
+                {(zone?.survivors || []).filter((s: any) => s.found && !s.rescued).length}
+              </span>
+            </button>
+          </div>
+          {/* Fleet controls sub-row */}
+          {leftTab === 'fleet' && (
+            <div className="fleet-controls-bar glass">
               <button className={`toggle-btn ${showRtbOnly ? 'active' : ''}`} onClick={() => setShowRtbOnly((v) => !v)}>
                 {showRtbOnly ? 'RTB ONLY' : 'ALL'}
               </button>
               <span className="telemetry-count">{displayedDrones.length}</span>
             </div>
-          </div>
+          )}
           <div className="tab-content glass scroll-area">
+            {leftTab === 'victims' ? (
+              <VictimListPanel survivors={zone?.survivors || []} highlighted={highlightedVictim} onSelect={setHighlightedVictim} />
+            ) : (
             <div className="drone-list">
               {displayedDrones.map((drone: any) => {
                 const isOffline = !drone.is_active;
@@ -458,6 +628,7 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
                 );
               })}
             </div>
+            )}
           </div>
         </section>
 
@@ -523,6 +694,7 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
                   if (isVictimRescued) cellClass += " rescued-cell";
                   else cellClass += " victim-cell";
                 }
+                if (highlightedVictim?.x === x && highlightedVictim?.y === y) cellClass += " victim-pinned";
 
                 return (
                   <div key={i} className={`grid-cell${cellClass}`}>
@@ -563,12 +735,12 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
                     {dronesAtPos.length > 1 && (
                       <div
                         className={`drone-marker multi ${dronesAtPos.some(isReturningDrone) ? 'returning' : ''} ${showRtbOnly && !dronesAtPos.some(isReturningDrone) ? 'dimmed' : ''}`}
-                        title={dronesAtPos.map(d => d.id).join(', ')}
+                        title={dronesAtPos.map((d: any) => d.id).join(', ')}
                       >
                         <div className="content-wrapper">
                           <span className="d-label font-mono">×{dronesAtPos.length}</span>
                           <span className="d-label font-mono" style={{ fontSize: '0.55rem', opacity: 0.85 }}>
-                            {dronesAtPos.map(d => d.id.split('-')[1]).join('·')}
+                            {dronesAtPos.map((d: any) => d.id.split('-')[1]).join('·')}
                           </span>
                         </div>
                       </div>
@@ -673,18 +845,41 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
               </div>
 
               <div className="popup-body">
+                {/* Thermal scan intel */}
+                {waitingDrone?.last_thermal_scan && (
+                  <div className="scan-intel-block">
+                    <div className="scan-intel-row">
+                      <span className="scan-intel-label">GRID REF</span>
+                      <span className="scan-intel-value font-mono">({waitingDrone.last_thermal_scan.x}, {waitingDrone.last_thermal_scan.y})</span>
+                    </div>
+                    <div className="scan-intel-row">
+                      <span className="scan-intel-label">CONFIDENCE</span>
+                      <span className="scan-intel-value font-mono">{waitingDrone.last_thermal_scan.confidence}%</span>
+                    </div>
+                    <div className="scan-intel-row">
+                      <span className="scan-intel-label">TRIAGE</span>
+                      <span className={`triage-badge ${triageCssClass(waitingDrone.last_thermal_scan.triage ?? '')}`}>
+                        {waitingDrone.last_thermal_scan.triage}
+                      </span>
+                      <span className="scan-condition-name">
+                        {(waitingDrone.last_thermal_scan.condition ?? 'UNKNOWN').replace(/_/g, ' ')}
+                      </span>
+                    </div>
+                    <div className="scan-intel-report">"{waitingDrone.last_thermal_scan.report}"</div>
+                  </div>
+                )}
                 <div className="comms-segment">
-                  <div className="segment-label">COMMUNICATION</div>
-                  
+                  <div className="segment-label"><Radio size={11} /> SURVIVOR INTEL</div>
+
                   {!isRecording && !transcription && (
                     <div className="comms-options">
-                      <p className="comms-hint">Ask the survivor for additional intelligence?</p>
+                      <p className="comms-hint">Does the survivor report additional casualties? Log their coordinates to dispatch a drone.</p>
                       <div className="flex-row gap-2 mt-4">
                         <button className="cyber-button primary full-w" onClick={toggleVoiceCapture}>
-                          <Volume2 size={16} /> SPEAK TO VICTIM
+                          <Mic size={16} /> LOG SURVIVOR REPORT
                         </button>
                         <button className="cyber-button secondary full-w" onClick={() => respondToVictim(waitingDrone.id)}>
-                          <Shield size={16} /> NO, JUST RESCUE
+                          <CheckCircle2 size={16} /> CONFIRM & RESUME
                         </button>
                       </div>
                     </div>
@@ -696,12 +891,12 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
                         {isRecording ? (
                           <div className="flex items-center gap-2 text-amber">
                             <div className="recording-dot"></div>
-                            <span>LISTENING...</span>
+                            <span>RECORDING REPORT...</span>
                           </div>
                         ) : (
                           <div className="flex items-center gap-2 text-success">
                             <CheckCircle2 size={14} />
-                            <span>READY TO SEND</span>
+                            <span>REPORT CAPTURED</span>
                           </div>
                         )}
                         <button className="reset-voice" onClick={() => { setTranscription(""); setOperatorMsg(""); if (isRecording) toggleVoiceCapture(); }}>
@@ -715,6 +910,10 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
 
                       {speechError && <div className="speech-error">{speechError}</div>}
 
+                      {transcription && !isRecording && (
+                        <p className="comms-dispatch-hint">Coordinates will be parsed and the nearest available drone dispatched.</p>
+                      )}
+
                       <div className="flex-row gap-2 mt-4">
                         {isRecording ? (
                           <button className="cyber-button amber full-w" onClick={toggleVoiceCapture}>
@@ -722,7 +921,7 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
                           </button>
                         ) : (
                           <button className="cyber-button primary full-w" onClick={() => respondToVictim(waitingDrone.id)}>
-                            <Send size={16} /> TRANSMIT INTEL & RESCUE
+                            <Send size={16} /> DISPATCH DRONE & CONFIRM
                           </button>
                         )}
                       </div>
@@ -730,6 +929,62 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
                   )}
                 </div>
               </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* --- MISSION COMPLETE CELEBRATION --- */}
+      <canvas
+        ref={celebrationCanvasRef}
+        className="celebration-canvas"
+        style={{ display: missionComplete ? 'block' : 'none' }}
+      />
+      <AnimatePresence>
+        {missionComplete && (
+          <motion.div
+            className="mission-complete-overlay"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setMissionComplete(false)}
+          >
+            <motion.div
+              className="mission-complete-card"
+              initial={{ scale: 0.7, opacity: 0, y: 40 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.8, opacity: 0 }}
+              transition={{ type: 'spring', stiffness: 260, damping: 20 }}
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="mc-glow-ring" />
+              <div className="mc-icon"><CheckCircle2 size={40} /></div>
+              <h2 className="mc-title">MISSION ACCOMPLISHED</h2>
+              <p className="mc-subtitle">ALL SURVIVORS ACCOUNTED FOR</p>
+              <div className="mc-stats">
+                <div className="mc-stat">
+                  <span className="mc-stat-value">{state?.stats?.total_victims ?? 0}</span>
+                  <span className="mc-stat-label">SURVIVORS</span>
+                </div>
+                <div className="mc-stat-divider" />
+                <div className="mc-stat">
+                  <span className="mc-stat-value">{state?.stats?.victims_rescued ?? 0}</span>
+                  <span className="mc-stat-label">CONFIRMED</span>
+                </div>
+                <div className="mc-stat-divider" />
+                <div className="mc-stat">
+                  <span className="mc-stat-value">{state?.stats?.coverage_pct ?? 0}%</span>
+                  <span className="mc-stat-label">COVERAGE</span>
+                </div>
+                <div className="mc-stat-divider" />
+                <div className="mc-stat">
+                  <span className="mc-stat-value">{state?.stats?.elapsed_ts ?? '--'}</span>
+                  <span className="mc-stat-label">ELAPSED</span>
+                </div>
+              </div>
+              <button className="cyber-button secondary mc-dismiss" onClick={() => setMissionComplete(false)}>
+                DISMISS
+              </button>
             </motion.div>
           </motion.div>
         )}
@@ -804,55 +1059,6 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
                   </table>
                 </div>
 
-                {/* Zone Priority */}
-                <div className="assump-section">
-                  <div className="assump-section-title">🎯 ZONE PRIORITY (auto-computed from terrain)</div>
-                  <table className="assump-table">
-                    <thead><tr><th>Priority</th><th>Condition</th><th>Effect</th></tr></thead>
-                    <tbody>
-                      <tr><td><span className="pri-badge high">HIGH</span></td><td>≥ 4 city cells in zone</td><td>Drone prefers this zone when transit distance is similar</td></tr>
-                      <tr><td><span className="pri-badge medium">MEDIUM</span></td><td>1–3 city cells in zone</td><td>Normal priority</td></tr>
-                      <tr><td><span className="pri-badge low">LOW</span></td><td>0 city cells in zone</td><td>Deferred — assigned last when others are covered</td></tr>
-                    </tbody>
-                  </table>
-                </div>
-
-                {/* Battery */}
-                <div className="assump-section">
-                  <div className="assump-section-title">🔋 BATTERY MODEL</div>
-                  <div className="assump-kv-grid">
-                    <div className="kv-row"><span>Flat / City move cost</span><span className="kv-val">1.0% / cell</span></div>
-                    <div className="kv-row"><span>Forest move cost</span><span className="kv-val warn-text">1.5% / cell</span></div>
-                    <div className="kv-row"><span>Thermal scan cost</span><span className="kv-val">1.0% / scan</span></div>
-                    <div className="kv-row"><span>Charge rate</span><span className="kv-val ok">+34% / charge step</span></div>
-                    <div className="kv-row"><span>Low battery recall threshold</span><span className="kv-val warn-text">≤ 25%</span></div>
-                    <div className="kv-row"><span>Emergency reserve (post-RTB)</span><span className="kv-val">8%</span></div>
-                  </div>
-                </div>
-
-                {/* Thermal scan */}
-                <div className="assump-section">
-                  <div className="assump-section-title">🔭 THERMAL DETECTION</div>
-                  <div className="assump-kv-grid">
-                    <div className="kv-row"><span>Detection algorithm</span><span className="kv-val">Gaussian thermal bloom (5×5 matrix)</span></div>
-                    <div className="kv-row"><span>Positive detection threshold</span><span className="kv-val highlight">max_heat ≥ 78 AND contrast ≥ 28</span></div>
-                    <div className="kv-row"><span>Survivor heat range</span><span className="kv-val">80–98°C (simulated body heat)</span></div>
-                    <div className="kv-row"><span>Ambient background</span><span className="kv-val">20–38°C (random noise)</span></div>
-                  </div>
-                </div>
-
-                {/* Grid / Agent */}
-                <div className="assump-section">
-                  <div className="assump-section-title">🤖 AGENT &amp; GRID</div>
-                  <div className="assump-kv-grid">
-                    <div className="kv-row"><span>Grid size</span><span className="kv-val">20 × 15 = 300 cells</span></div>
-                    <div className="kv-row"><span>Search zones</span><span className="kv-val">12 zones (5×5 each, 4 col × 3 row)</span></div>
-                    <div className="kv-row"><span>Drone fleet</span><span className="kv-val">5 × ALPHA drones</span></div>
-                    <div className="kv-row"><span>Sim tick rate</span><span className="kv-val">0.7 s / step</span></div>
-                    <div className="kv-row"><span>Distance metric</span><span className="kv-val">Chebyshev (diagonal = 1 step)</span></div>
-                    <div className="kv-row"><span>Path planning</span><span className="kv-val">Zig-zag scan + diagonal transit to nearest corner</span></div>
-                  </div>
-                </div>
               </div>
             </motion.div>
           </motion.div>
@@ -1480,6 +1686,7 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
         
         .comms-interface { margin-top: 0.25rem; }
         .comms-hint { color: var(--text-muted); font-size: 0.8rem; text-align: center; line-height: 1.4; }
+        .comms-dispatch-hint { color: var(--accent-cyan); font-size: 0.7rem; opacity: 0.7; text-align: center; letter-spacing: 0.03em; }
         
         .voice-interface { display: flex; flex-direction: column; gap: 0.75rem; }
         .voice-status { display: flex; justify-content: space-between; align-items: center; font-size: 0.7rem; font-weight: bold; }
@@ -1624,6 +1831,165 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
         .ok { color: var(--accent-success) !important; }
         .err { color: var(--accent-red, #ff3d3d) !important; }
         .muted { color: var(--text-muted) !important; opacity: 0.6; }
+
+        /* ── Mission Complete Celebration ── */
+        .celebration-canvas {
+          position: fixed; inset: 0; width: 100vw; height: 100vh;
+          pointer-events: none; z-index: 9998;
+        }
+        .mission-complete-overlay {
+          position: fixed; inset: 0; z-index: 9999;
+          display: flex; align-items: center; justify-content: center;
+          background: rgba(0, 0, 0, 0.55); backdrop-filter: blur(4px);
+        }
+        .mission-complete-card {
+          position: relative; overflow: hidden;
+          background: linear-gradient(145deg, rgba(10,20,35,0.98), rgba(5,15,25,0.98));
+          border: 1px solid rgba(0, 255, 136, 0.35);
+          border-radius: 16px; padding: 2.5rem 3rem;
+          text-align: center; min-width: 380px;
+          box-shadow: 0 0 60px rgba(0,255,136,0.15), 0 0 120px rgba(0,243,255,0.08);
+        }
+        .mc-glow-ring {
+          position: absolute; inset: -1px; border-radius: 16px;
+          background: transparent;
+          box-shadow: inset 0 0 30px rgba(0,255,136,0.08);
+          pointer-events: none;
+          animation: mc-ring-pulse 2s ease-in-out infinite;
+        }
+        @keyframes mc-ring-pulse {
+          0%, 100% { box-shadow: inset 0 0 30px rgba(0,255,136,0.08); }
+          50%       { box-shadow: inset 0 0 50px rgba(0,255,136,0.18); }
+        }
+        .mc-icon {
+          color: #00ff88; margin-bottom: 1rem;
+          filter: drop-shadow(0 0 12px rgba(0,255,136,0.6));
+          animation: mc-icon-pop 0.5s cubic-bezier(0.34,1.56,0.64,1) both;
+        }
+        @keyframes mc-icon-pop {
+          from { transform: scale(0); opacity: 0; }
+          to   { transform: scale(1); opacity: 1; }
+        }
+        .mc-title {
+          font-family: 'Orbitron', sans-serif; font-size: 1.35rem;
+          font-weight: 900; letter-spacing: 0.12em;
+          color: #00ff88; margin: 0 0 0.4rem;
+          text-shadow: 0 0 20px rgba(0,255,136,0.5);
+        }
+        .mc-subtitle {
+          font-family: 'Orbitron', sans-serif; font-size: 0.7rem;
+          letter-spacing: 0.18em; color: var(--text-muted); margin: 0 0 1.75rem;
+        }
+        .mc-stats {
+          display: flex; align-items: center; justify-content: center;
+          gap: 0; margin-bottom: 1.75rem;
+          background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.07);
+          border-radius: 10px; padding: 1rem 0.5rem;
+        }
+        .mc-stat { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        .mc-stat-value {
+          font-family: 'Orbitron', sans-serif; font-size: 1.3rem; font-weight: 700;
+          color: var(--accent-cyan);
+        }
+        .mc-stat-label {
+          font-family: 'Orbitron', sans-serif; font-size: 0.55rem;
+          letter-spacing: 0.1em; color: var(--text-muted);
+        }
+        .mc-stat-divider { width: 1px; height: 36px; background: rgba(255,255,255,0.1); flex-shrink: 0; }
+        .mc-dismiss { margin-top: 0; width: 100%; }
+
+        /* ── Victim map highlight ── */
+        .victim-item { cursor: pointer; transition: outline 0.15s ease; }
+        .victim-item.map-highlighted {
+          outline: 1px solid var(--accent-cyan);
+          box-shadow: 0 0 8px rgba(0,243,255,0.25);
+        }
+        .grid-cell.victim-pinned {
+          outline: 2px solid var(--accent-cyan) !important;
+          outline-offset: -2px;
+          box-shadow: 0 0 12px rgba(0,243,255,0.6), inset 0 0 8px rgba(0,243,255,0.2) !important;
+          animation: ping-cyan 1.2s ease-in-out infinite !important;
+          z-index: 10;
+        }
+        @keyframes ping-cyan {
+          0%, 100% { box-shadow: 0 0 10px rgba(0,243,255,0.5), inset 0 0 6px rgba(0,243,255,0.15); }
+          50%       { box-shadow: 0 0 22px rgba(0,243,255,0.9), inset 0 0 12px rgba(0,243,255,0.3); }
+        }
+
+        /* ── Left Panel Tab Bar ── */
+        .left-tab-bar {
+          display: flex; border-radius: 8px 8px 0 0; overflow: hidden; flex-shrink: 0;
+        }
+        .left-tab-btn {
+          flex: 1; display: flex; align-items: center; justify-content: center; gap: 5px;
+          padding: 10px 6px; font-family: 'Orbitron', sans-serif; font-size: 0.65rem;
+          letter-spacing: 0.06em; background: transparent; border: none;
+          color: var(--text-muted); cursor: pointer; border-bottom: 2px solid transparent;
+          transition: all 0.2s ease;
+        }
+        .left-tab-btn.active { color: var(--accent-cyan); border-bottom-color: var(--accent-cyan); background: rgba(0,243,255,0.06); }
+        .left-tab-btn:not(.active):hover { background: rgba(255,255,255,0.04); }
+        .tab-count {
+          font-size: 0.62rem; background: rgba(255,255,255,0.08); border-radius: 999px;
+          padding: 1px 6px; min-width: 18px; text-align: center;
+        }
+        .tab-count.urgent { background: rgba(255,61,61,0.2); color: var(--accent-red, #ff3d3d); border: 1px solid rgba(255,61,61,0.35); }
+        .fleet-controls-bar {
+          display: flex; align-items: center; padding: 6px 14px; gap: 8px;
+          border-radius: 0; flex-shrink: 0; justify-content: flex-end;
+        }
+
+        /* ── Victim List ── */
+        .victim-list { display: flex; flex-direction: column; gap: 0.55rem; }
+        .victim-list-empty {
+          display: flex; flex-direction: column; align-items: center; gap: 10px;
+          opacity: 0.35; padding: 2.5rem 1rem; font-family: 'Orbitron', sans-serif; font-size: 0.72rem;
+        }
+        .victim-item {
+          background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.07);
+          border-left: 3px solid rgba(255,255,255,0.15); border-radius: 6px; padding: 9px 10px;
+        }
+        .victim-item.p1_critical { border-left-color: #ff3d3d; background: rgba(255,61,61,0.06); }
+        .victim-item.p2_urgent   { border-left-color: #ffb300; background: rgba(255,179,0,0.05); }
+        .victim-item.p3_stable   { border-left-color: #00ff88; background: rgba(0,255,136,0.04); }
+        .victim-item.rescued     { opacity: 0.42; filter: grayscale(55%); border-left-color: rgba(255,255,255,0.12) !important; }
+
+        .victim-item-header { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+        .victim-id { font-family: 'Orbitron', sans-serif; font-size: 0.78rem; font-weight: 700; color: var(--text-primary); }
+        .victim-coord { font-size: 0.63rem; opacity: 0.5; margin-left: auto; font-family: 'Courier New', monospace; }
+
+        .triage-badge {
+          font-family: 'Orbitron', sans-serif; font-size: 0.53rem; font-weight: 700;
+          letter-spacing: 0.05em; padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+        }
+        .triage-badge.p1_critical { background: rgba(255,61,61,0.18); color: #ff7070; border: 1px solid rgba(255,61,61,0.4); }
+        .triage-badge.p2_urgent   { background: rgba(255,179,0,0.15); color: #ffb300; border: 1px solid rgba(255,179,0,0.4); }
+        .triage-badge.p3_stable   { background: rgba(0,255,136,0.12); color: #00ff88; border: 1px solid rgba(0,255,136,0.35); }
+
+        .victim-condition {
+          font-family: 'Orbitron', sans-serif; font-size: 0.6rem; letter-spacing: 0.04em;
+          color: var(--text-muted); margin-bottom: 3px; text-transform: uppercase;
+        }
+        .victim-report-text { font-size: 0.7rem; opacity: 0.7; font-style: italic; margin-bottom: 6px; }
+        .victim-status-row { display: flex; }
+        .victim-chip {
+          font-family: 'Orbitron', sans-serif; font-size: 0.56rem; letter-spacing: 0.04em;
+          padding: 2px 8px; border-radius: 999px;
+        }
+        .victim-chip.rescued  { background: rgba(0,255,136,0.1); color: #00ff88; border: 1px solid rgba(0,255,136,0.3); }
+        .victim-chip.mobile   { background: rgba(0,243,255,0.1); color: var(--accent-cyan); border: 1px solid rgba(0,243,255,0.3); }
+        .victim-chip.awaiting { background: rgba(255,179,0,0.1); color: #ffb300; border: 1px solid rgba(255,179,0,0.3); }
+
+        /* ── Popup Scan Intel Block ── */
+        .scan-intel-block {
+          background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);
+          border-radius: 8px; padding: 10px 14px; margin-bottom: 0;
+        }
+        .scan-intel-row { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+        .scan-intel-label { font-family: 'Orbitron', sans-serif; font-size: 0.58rem; color: var(--text-muted); width: 82px; flex-shrink: 0; letter-spacing: 0.05em; }
+        .scan-intel-value { font-family: 'Courier New', monospace; font-size: 0.78rem; color: var(--text-primary); }
+        .scan-condition-name { font-size: 0.7rem; opacity: 0.72; text-transform: uppercase; letter-spacing: 0.04em; }
+        .scan-intel-report { font-style: italic; font-size: 0.72rem; opacity: 0.62; margin-top: 7px; padding-top: 7px; border-top: 1px solid rgba(255,255,255,0.07); }
       `}</style>
     </div>
   );
