@@ -6,6 +6,20 @@ A decentralised swarm intelligence simulation where **SENTINEL**, an LLM-based A
 
 ---
 
+## 🔗 Important Links
+- 🎥 **Video Pitch** — [Watch Here]([https://your-video-link.com](https://drive.google.com/file/d/1EoJiO5pVr7WkDu42abikjdooGh9g27nc))
+- 📄 **RescueSwarm Documentation** — [View Documentation]([https://your-doc-link.com](https://www.notion.so/RESCUESWARM-Autonomous-Drone-Swarm-System-Documentation-3282193af50f81ada411d46badc34219))
+
+---
+
+## 👥 Team Members
+- 👨‍💻 **Dennis** — 3rd Year @ UM  
+- 👨‍💻 **Shao Xian** — 3rd Year @ UM  
+- 👨‍💻 **Zhen Yu** — 3rd Year @ UM  
+- 👨‍💻 **Sean Sean** — 3rd Year @ UM  
+
+---
+
 ## 📋 Table of Contents
 
 - [Project Overview](#-project-overview)
