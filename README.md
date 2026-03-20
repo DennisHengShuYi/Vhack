@@ -7,7 +7,7 @@ A decentralised swarm intelligence simulation where **SENTINEL**, an LLM-based A
 ---
 
 ## 🔗 Important Links
-- 🎥 **Video Pitch** — [Watch Here](https://drive.google.com/file/d/1EoJiO5pVr7WkDu42abikjdooGh9g27nc)
+- 🎥 **Video Pitch** — [Watch Here](https://drive.google.com/file/d/1Ze4XMRp9NOvSKgYNoyDbC4k5IU-W0Bdh/view?usp=sharing)
 - 📄 **RescueSwarm Documentation** — [View Documentation](https://www.notion.so/RESCUESWARM-Autonomous-Drone-Swarm-System-Documentation-3282193af50f81ada411d46badc34219)
 
 ---
