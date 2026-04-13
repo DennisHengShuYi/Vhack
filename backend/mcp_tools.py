@@ -456,6 +456,36 @@ def register_tools(mcp):
 
         return "\n".join(lines)
 
+    @mcp.tool()
+    def get_probability_map() -> str:
+        """
+        Returns per-zone survivor probability scores based on terrain analysis
+        and Bayesian updates from scan results. Higher score = more likely to contain
+        undiscovered survivors. Use this to prioritize which zones to assign first.
+        """
+        sim = shared.sim
+        lines = ["=== SURVIVOR PROBABILITY MAP (per zone) ==="]
+        zone_probs = []
+        for zid, z in sim.zone.zones.items():
+            zone_prob = sum(
+                sim.probability_map[y][x]
+                for y in range(z.sy, z.ey + 1)
+                for x in range(z.sx, z.ex + 1)
+            )
+            unscanned = sum(
+                1 for y in range(z.sy, z.ey + 1)
+                for x in range(z.sx, z.ex + 1)
+                if not sim.zone.scanned_cells[y][x] and not sim.is_inaccessible(x, y)
+            )
+            zone_probs.append((zid, zone_prob, unscanned, z.status.value, z.priority))
+        zone_probs.sort(key=lambda x: -x[1])
+        for zid, prob, unscanned, status, priority in zone_probs:
+            lines.append(
+                f"  {zid}: probability={prob:.3f} | unscanned={unscanned} cells | "
+                f"status={status} | priority={priority}"
+            )
+        return "\n".join(lines)
+
     # ── Action Tools ──────────────────────────────────────────────────────────
 
     @mcp.tool()
@@ -575,6 +605,49 @@ def register_tools(mcp):
         drone.status_label = "RTB"
         sim.log(f"🔁 AGENT: {drone_id} recalled to base.", "INFO", drone_id)
         return f"Drone {drone_id} is returning to base ({base_x},{base_y})."
+
+    @mcp.tool()
+    def split_scan_zone(drone_a_id: str, drone_b_id: str, zone_id: str) -> str:
+        """
+        Splits a HIGH-priority zone between two drones for parallel scanning.
+        Drone A takes the top half, Drone B takes the bottom half.
+        Use only for HIGH-priority zones when 2+ idle drones are nearby.
+        Args:
+            drone_a_id: First drone (e.g. 'ALPHA-1') — scans top half.
+            drone_b_id: Second drone (e.g. 'ALPHA-2') — scans bottom half.
+            zone_id: The zone to split (e.g. 'Z5').
+        """
+        sim = shared.sim
+        for did in (drone_a_id, drone_b_id):
+            drone = sim.drones.get(did)
+            if not drone:
+                return f"Error: Drone {did} not found."
+            if not drone.is_active:
+                return f"Error: {did} is OFFLINE."
+            if drone.is_waiting_response:
+                return f"Error: {did} is on VICTIM STANDBY."
+            if drone.is_charging and drone.battery < 90:
+                return f"Error: {did} is charging ({drone.battery:.0f}%)."
+
+        zone = sim.zone.zones.get(zone_id)
+        if not zone:
+            return f"Error: Zone {zone_id} does not exist."
+        if zone.status != ZoneStatus.UNSCANNED:
+            return f"Error: Zone {zone_id} is already {zone.status.value}."
+
+        if not sim.claim_zone(zone_id, f"{drone_a_id}+{drone_b_id}"):
+            return f"Error: Zone {zone_id} was just claimed."
+
+        result = sim.assign_zone_split(drone_a_id, drone_b_id, zone_id)
+        if "error" in result:
+            sim.release_zone(zone_id)
+            return f"Error: {result['error']}"
+
+        sim.log(
+            f"📡 AGENT DISPATCH: {drone_a_id} + {drone_b_id} split-scanning zone {zone_id}.",
+            "AI",
+        )
+        return f"SUCCESS: {result['message']}"
 
     @mcp.tool()
     def reassign_drone(drone_id: str, zone_id: str) -> str:

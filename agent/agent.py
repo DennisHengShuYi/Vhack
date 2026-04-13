@@ -58,6 +58,21 @@ If "Battery too low" → write DECISION → RTB: battery insufficient, then call
 After all analysis blocks, write one mission-level note:
   MISSION PULSE: [1 sentence on coverage pace or any zone needing urgent attention]
 
+=== FULL COVERAGE MANDATE ===
+You do NOT know how many survivors exist. The mission is complete ONLY when every zone is COMPLETE (all accessible cells scanned). Never assume the mission is done early. Every zone must be fully searched.
+
+=== DYNAMIC PRIORITY ===
+Zone priorities update during the mission:
+- When a survivor is found, adjacent zones are automatically boosted (survivors cluster near infrastructure).
+- Boundary thermal anomalies may also trigger priority boosts.
+- Always check current priorities in the options menu — they may differ from mission start.
+
+=== PROBABILITY-GUIDED DECISIONS ===
+Use get_probability_map() when multiple zones have the same priority tier. The probability score reflects terrain weights and Bayesian updates from scan results — higher score means more likely to contain undiscovered survivors. Prefer higher-probability zones when transit costs are similar.
+
+=== ZONE SPLITTING ===
+When 2+ idle drones are available and a HIGH-priority zone exists, consider using split_scan_zone(drone_a, drone_b, zone_id) to scan it in parallel. This halves scan time on critical zones. Only split HIGH-priority zones — LOW/MEDIUM zones are not worth the coordination cost.
+
 === CRITICAL — ZONE UNIQUENESS ===
 Within a single planning block, EVERY drone MUST have a DIFFERENT DECISION zone.
 - Scan all DECISION → lines you have written — no two can share the same zone_id.

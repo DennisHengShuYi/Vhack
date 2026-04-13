@@ -119,27 +119,44 @@ async def run_simulation_loop():
                         drone.status_label = "VICTIM STANDBY"
                         continue
 
-                    # Auto-charge at base
+                    # Auto-charge at base (adaptive — charge only to minimum needed)
                     if (drone.x, drone.y) == (base_x, base_y) and drone.battery < 100 and (
                         drone.returning_to_base or drone.is_charging or drone.battery < LOW_BATTERY_THRESHOLD
                     ):
+                        charge_target = sim.smart_charge_target(d_id)
                         if not drone.is_charging:
-                            sim.log(f"🤖 {d_id} arrived at base. Commencing recharge.", "INFO", d_id)
+                            sim.log(f"🤖 {d_id} arrived at base. Charging to {charge_target:.0f}%.", "INFO", d_id)
                         sim.charge_step(d_id)
-                        if not drone.is_charging:
-                            # Charging just completed — clear RTB flag and wait for agent assignment
+                        # Stop charging early if we've reached the smart target
+                        if drone.battery >= charge_target and drone.is_charging:
+                            drone.is_charging = False
+                            drone.charge_cycles += 1
+                            drone.status = "IDLE"
+                            drone.status_label = "READY"
+                            drone.target_x = None
+                            drone.target_y = None
                             drone.returning_to_base = False
-                        continue  # Always skip movement logic while at base charging/post-charge
+                            drone.voice_override = False
+                            sim.log(f"[BATTERY] {d_id} smart-charged to {drone.battery:.0f}%. Ready.", "CHARGE", d_id)
+                        if not drone.is_charging:
+                            drone.returning_to_base = False
+                        continue
 
                     # No target and empty path — zone complete; check pending residual then go idle
                     if drone.target_x is None and not drone.path_queue:
                         # Zone completion bookkeeping
                         if drone.assigned_zone_id:
                             zid = drone.assigned_zone_id
-                            if zid in sim.zone.zones:
+                            drone.assigned_zone_id = None
+                            # Only mark COMPLETE if no other drone is still scanning this zone
+                            other_scanning = any(
+                                d.assigned_zone_id == zid
+                                for did2, d in sim.drones.items()
+                                if did2 != d_id
+                            )
+                            if not other_scanning and zid in sim.zone.zones:
                                 sim.zone.zones[zid].status = ZoneStatus.COMPLETE
                                 sim.log(f"✅ Zone {zid} search complete.", "SUCCESS", d_id)
-                            drone.assigned_zone_id = None
 
                         # RESIDUAL HANDOFF: if this drone was reserved to cover a residual zone, go there now
                         if drone.pending_zone_id and not drone.returning_to_base:

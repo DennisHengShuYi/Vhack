@@ -17,6 +17,7 @@ BATTERY_DRAIN_MOVE   = 1.0    # % per cell moved
 BATTERY_DRAIN_SCAN   = 1.0    # % per thermal scan
 LOW_BATTERY_THRESHOLD = 25.0  # % — recall threshold
 BATTERY_RETURN_RESERVE = 8.0  # % — emergency reserve after reaching base
+TERRAIN_SCAN_WEIGHT: Dict[str, int] = {'city': 5, 'forest': 2, 'flat': 1}
 NUM_DRONES           = 5
 
 # ─── Victim Condition Constants ────────────────────────────────────────────────
@@ -57,6 +58,7 @@ class Zone(BaseModel):
     assigned_to: Optional[str] = None
     priority: str = "MEDIUM"
     residual_path: List[List[int]] = []
+    boundary_signals: List[Dict[str, Any]] = []  # thermal signals near zone edges
 
 def chebyshev(x1: int, y1: int, x2: int, y2: int) -> int:
     return max(abs(x2 - x1), abs(y2 - y1))
@@ -322,6 +324,7 @@ class SimulationState:
         self.tick_count: int = 0                   # Incremented every sim tick
         self.streaming_text: str = ""              # Live LLM token buffer for real-time frontend display
         self.reserved_zones: Dict[str, str] = {}  # zone_id → drone_id that will cover residual
+        self.probability_map: List[List[float]] = self._init_probability_map()
 
     def _sample_unique_points(self, count: int) -> List[tuple]:
         cells = [(x, y) for y in range(GRID_H) for x in range(GRID_W)]
@@ -338,6 +341,42 @@ class SimulationState:
         if len(selected) < count:
             selected.extend(random.choices(cells, k=count - len(selected)))
         return selected
+
+    def _init_probability_map(self) -> List[List[float]]:
+        """Initialize per-cell survivor probability based on terrain weights."""
+        weights: List[List[float]] = []
+        total = 0.0
+        for y in range(GRID_H):
+            row: List[float] = []
+            for x in range(GRID_W):
+                if self.is_inaccessible(x, y):
+                    row.append(0.0)
+                else:
+                    w = float(TERRAIN_SCAN_WEIGHT.get(self.zone.terrain_types[y][x], 1))
+                    row.append(w)
+                    total += w
+            weights.append(row)
+        if total > 0:
+            for y in range(GRID_H):
+                for x in range(GRID_W):
+                    weights[y][x] /= total
+        return weights
+
+    def update_probability_after_scan(self, x: int, y: int, survivor_found: bool):
+        """Update probability map after scanning a cell."""
+        self.probability_map[y][x] = 0.0
+        if survivor_found:
+            for dx in range(-2, 3):
+                for dy in range(-2, 3):
+                    if dx == 0 and dy == 0:
+                        continue
+                    nx, ny = x + dx, y + dy
+                    if (0 <= nx < GRID_W and 0 <= ny < GRID_H
+                            and not self.is_inaccessible(nx, ny)
+                            and not self.zone.scanned_cells[ny][nx]):
+                        dist = max(abs(dx), abs(dy))
+                        boost = 0.02 if dist == 1 else 0.01
+                        self.probability_map[ny][nx] += boost
 
     def is_inaccessible(self, x: int, y: int) -> bool:
         if x < 0 or y < 0 or x >= GRID_W or y >= GRID_H:
@@ -398,6 +437,39 @@ class SimulationState:
                 })
         return available
 
+    def smart_charge_target(self, drone_id: str) -> float:
+        """Returns the minimum battery level needed for the cheapest available zone assignment.
+        Drones charge to this level instead of always 100%, saving time at base."""
+        available = self.get_available_zones()
+        if not available:
+            return 100.0  # No zones left — full charge for standby/recall
+
+        base_x, base_y = self.base_station
+        min_needed = 100.0
+
+        for z in available:
+            transit = min(
+                chebyshev(base_x, base_y, z["sx"], z["sy"]),
+                chebyshev(base_x, base_y, z["ex"], z["sy"]),
+                chebyshev(base_x, base_y, z["sx"], z["ey"]),
+                chebyshev(base_x, base_y, z["ex"], z["ey"]),
+            )
+            zone_obj = self.zone.zones[z["zone_id"]]
+            scan_cost = sum(
+                1.5 if self.zone.terrain_types[cy][cx] == 'forest' else 1.0
+                for cy in range(zone_obj.sy, zone_obj.ey + 1)
+                for cx in range(zone_obj.sx, zone_obj.ex + 1)
+                if not self.zone.scanned_cells[cy][cx] and not self.is_inaccessible(cx, cy)
+            )
+            return_cost = max(
+                chebyshev(z["ex"], z["ey"], base_x, base_y),
+                chebyshev(z["sx"], z["ey"], base_x, base_y),
+            )
+            total = transit + scan_cost + return_cost + BATTERY_RETURN_RESERVE
+            min_needed = min(min_needed, total)
+
+        return min(100.0, min_needed + 10.0)  # +10% safety margin
+
     def claim_zone(self, zone_id: str, drone_id: str) -> bool:
         zone = self.zone.zones.get(zone_id)
         if not zone:
@@ -414,8 +486,85 @@ class SimulationState:
             zone.status = ZoneStatus.UNSCANNED
             zone.assigned_to = None
 
+    def _zone_at(self, x: int, y: int) -> Optional[str]:
+        """Returns the zone_id containing cell (x, y), or None."""
+        for zid, z in self.zone.zones.items():
+            if z.sx <= x <= z.ex and z.sy <= y <= z.ey:
+                return zid
+        return None
+
+    def _get_adjacent_zone_ids(self, zone_id: str) -> List[str]:
+        """Returns zone IDs that share a border with the given zone."""
+        zone = self.zone.zones.get(zone_id)
+        if not zone:
+            return []
+        adjacent = []
+        for zid, z in self.zone.zones.items():
+            if zid == zone_id:
+                continue
+            horiz_touch = (z.sx <= zone.ex + 1 and z.ex >= zone.sx - 1)
+            vert_touch = (z.sy <= zone.ey + 1 and z.ey >= zone.sy - 1)
+            if horiz_touch and vert_touch:
+                adjacent.append(zid)
+        return adjacent
+
+    def boost_adjacent_zones(self, found_x: int, found_y: int):
+        """After a survivor is found, boost priority of adjacent unscanned zones."""
+        found_zone = self._zone_at(found_x, found_y)
+        if not found_zone:
+            return
+        for zid in self._get_adjacent_zone_ids(found_zone):
+            zone = self.zone.zones[zid]
+            if zone.status != ZoneStatus.COMPLETE:
+                old = zone.priority
+                if old != "HIGH":
+                    zone.priority = "HIGH" if old == "MEDIUM" else "MEDIUM"
+                    self.log(
+                        f"Zone {zid} priority boosted {old} -> {zone.priority} "
+                        f"(survivor found in adjacent {found_zone})",
+                        "INFO",
+                    )
+
+    def _generate_terrain_priority_path(
+        self, zone: 'Zone', start_x: int, start_y: int
+    ) -> List[List[int]]:
+        """Generate a scan path that visits high-value terrain cells first.
+        Groups cells into terrain tiers (city > forest > flat), then within
+        each tier uses spatial clustering to minimize backtracking.
+        All accessible, unscanned cells are included — full coverage guaranteed."""
+        cells_by_tier: Dict[int, List[tuple]] = {5: [], 2: [], 1: []}
+
+        for y in range(zone.sy, zone.ey + 1):
+            for x in range(zone.sx, zone.ex + 1):
+                if self.is_inaccessible(x, y):
+                    continue
+                if self.zone.scanned_cells[y][x]:
+                    continue
+                weight = TERRAIN_SCAN_WEIGHT.get(self.zone.terrain_types[y][x], 1)
+                cells_by_tier[weight].append((x, y))
+
+        # Within each tier, sort by proximity to minimize backtracking
+        # Use nearest-neighbor greedy ordering
+        ordered: List[tuple] = []
+        cx, cy = start_x, start_y
+        for tier in (5, 2, 1):  # city first, then forest, then flat
+            remaining = list(cells_by_tier[tier])
+            while remaining:
+                best_idx = 0
+                best_dist = chebyshev(cx, cy, remaining[0][0], remaining[0][1])
+                for i in range(1, len(remaining)):
+                    d = chebyshev(cx, cy, remaining[i][0], remaining[i][1])
+                    if d < best_dist:
+                        best_dist = d
+                        best_idx = i
+                cell = remaining.pop(best_idx)
+                ordered.append(cell)
+                cx, cy = cell
+
+        return [[x, y] for x, y in ordered]
+
     def assign_zone(self, drone_id: str, zone_id: str) -> Dict[str, Any]:
-        """Generates path sequence: transit to closest corner + zig-zag scan."""
+        """Generates path sequence: transit to closest corner + terrain-priority scan."""
         drone = self.drones.get(drone_id)
         zone = self.zone.zones.get(zone_id)
         if not drone or not zone:
@@ -447,8 +596,8 @@ class SimulationState:
 
         curr_x, curr_y = drone.x, drone.y
 
-        # BFS transit to zone corner — avoids lake/hazard cells
-        transit = self.compute_path(curr_x, curr_y, target_sx, target_sy)
+        # Smart transit to zone corner — detours through nearby high-value unscanned cells
+        transit = self.compute_smart_transit(curr_x, curr_y, target_sx, target_sy)
         new_queue.extend(transit)
         curr_x, curr_y = target_sx, target_sy
 
@@ -479,23 +628,13 @@ class SimulationState:
                         if [sx, sy] not in new_queue:
                             enqueue(sx, sy)
         else:
-            rev_x = (target_sx == end_x)
-            rev_y = (target_sy == end_y)
-            y_range = range(start_y, end_y + 1)
-            if rev_y:
-                y_range = range(end_y, start_y - 1, -1)
-
-            for i, y in enumerate(y_range):
-                if i % 2 == 0:
-                    xs = range(end_x, start_x - 1, -1) if rev_x else range(start_x, end_x + 1)
-                else:
-                    xs = range(start_x, end_x + 1) if rev_x else range(end_x, start_x - 1, -1)
-                for x in xs:
-                    if self.is_inaccessible(x, y):
-                        continue
-                    if self.zone.scanned_cells[y][x]:
-                        continue  # skip already-scanned cells; enqueue() will route through them if needed
-                    enqueue(x, y)
+            # Terrain-priority path: city cells first, then forest, then flat
+            # Nearest-neighbor ordering within each tier minimizes backtracking
+            priority_cells = self._generate_terrain_priority_path(
+                zone, target_sx, target_sy
+            )
+            for cell_x, cell_y in priority_cells:
+                enqueue(cell_x, cell_y)
 
         # path_queue is assigned FIRST so the tick loop never sees assigned_zone_id set
         # with an empty queue (which would falsely mark the zone COMPLETE).
@@ -508,6 +647,62 @@ class SimulationState:
         return {
             "success": True,
             "message": f"Assigned {drone_id} to zone {zone_id} ({start_x},{start_y} -> {end_x},{end_y})"
+        }
+
+    def assign_zone_split(
+        self, drone_a_id: str, drone_b_id: str, zone_id: str
+    ) -> Dict[str, Any]:
+        """Split a zone between two drones: drone_a scans top half, drone_b scans bottom half."""
+        drone_a = self.drones.get(drone_a_id)
+        drone_b = self.drones.get(drone_b_id)
+        zone = self.zone.zones.get(zone_id)
+        if not drone_a or not drone_b or not zone:
+            return {"error": "Drone(s) or Zone not found"}
+
+        mid_y = (zone.sy + zone.ey) // 2
+
+        # Build top-half sub-zone for drone A
+        top_zone = Zone(id=zone_id, sx=zone.sx, sy=zone.sy, ex=zone.ex, ey=mid_y, priority=zone.priority)
+        top_cells = self._generate_terrain_priority_path(top_zone, drone_a.x, drone_a.y)
+        transit_a = self.compute_smart_transit(drone_a.x, drone_a.y, top_zone.sx, top_zone.sy)
+
+        # Build bottom-half sub-zone for drone B
+        bot_zone = Zone(id=zone_id, sx=zone.sx, sy=mid_y + 1, ex=zone.ex, ey=zone.ey, priority=zone.priority)
+        bot_cells = self._generate_terrain_priority_path(bot_zone, drone_b.x, drone_b.y)
+        transit_b = self.compute_smart_transit(drone_b.x, drone_b.y, bot_zone.sx, bot_zone.sy)
+
+        # Build full path queues with gap-fill
+        queue_a: List[List[int]] = list(transit_a)
+        prev_a: tuple = (transit_a[-1][0], transit_a[-1][1]) if transit_a else (drone_a.x, drone_a.y)
+        for cx, cy in top_cells:
+            if chebyshev(prev_a[0], prev_a[1], cx, cy) > 1:
+                queue_a.extend(self.compute_path(prev_a[0], prev_a[1], cx, cy))
+            else:
+                queue_a.append([cx, cy])
+            prev_a = (cx, cy)
+
+        queue_b: List[List[int]] = list(transit_b)
+        prev_b: tuple = (transit_b[-1][0], transit_b[-1][1]) if transit_b else (drone_b.x, drone_b.y)
+        for cx, cy in bot_cells:
+            if chebyshev(prev_b[0], prev_b[1], cx, cy) > 1:
+                queue_b.extend(self.compute_path(prev_b[0], prev_b[1], cx, cy))
+            else:
+                queue_b.append([cx, cy])
+            prev_b = (cx, cy)
+
+        drone_a.path_queue = queue_a
+        drone_a.assigned_zone_id = zone_id
+        drone_a.status = "ON_MISSION"
+        drone_a.status_label = f"SCANNING {zone_id} (TOP)"
+
+        drone_b.path_queue = queue_b
+        drone_b.assigned_zone_id = zone_id
+        drone_b.status = "ON_MISSION"
+        drone_b.status_label = f"SCANNING {zone_id} (BOT)"
+
+        return {
+            "success": True,
+            "message": f"{drone_a_id} scanning top half, {drone_b_id} scanning bottom half of {zone_id}"
         }
 
     # ─── Heartbeat Protocol ──────────────────────────────────────────────────────
@@ -679,6 +874,8 @@ class SimulationState:
                 drone.status = "IDLE"
                 drone.status_label = "VICTIM DETECTED"
                 self.total_victims_found += 1
+                self.boost_adjacent_zones(x, y)  # NEW: dynamic priority update
+                self.update_probability_after_scan(x, y, True)
                 drone.last_thermal_scan = {
                     "x": x, "y": y,
                     "confidence": confidence,
@@ -699,12 +896,35 @@ class SimulationState:
                 self.log(msg, "VICTIM_FOUND", drone_id)
                 return msg
             elif survivor and survivor["found"] and not survivor["rescued"]:
+                self.update_probability_after_scan(x, y, False)
                 return f"Confirmed victim at ({x},{y}) — awaiting extraction."
             elif survivor and survivor["rescued"]:
+                self.update_probability_after_scan(x, y, False)
                 return f"Position ({x},{y}) cleared after successful rescue."
 
         if max_heat > 55:
-            return (f"Thermal anomaly at ({x},{y}) — heat:{max_heat}°, contrast:{heat_contrast:.0f}. NOT human.")
+            # Track boundary thermal signals for adjacent zone intelligence
+            drone_zone = drone.assigned_zone_id
+            if drone_zone:
+                dz = self.zone.zones.get(drone_zone)
+                if dz:
+                    on_boundary = (x == dz.sx or x == dz.ex or y == dz.sy or y == dz.ey)
+                    if on_boundary:
+                        for adj_zid in self._get_adjacent_zone_ids(drone_zone):
+                            adj_zone = self.zone.zones[adj_zid]
+                            if adj_zone.status != ZoneStatus.COMPLETE:
+                                adj_zone.boundary_signals.append({"x": x, "y": y, "heat": max_heat})
+                                if len(adj_zone.boundary_signals) >= 2 and adj_zone.priority != "HIGH":
+                                    old = adj_zone.priority
+                                    adj_zone.priority = "HIGH"
+                                    self.log(
+                                        f"Zone {adj_zid} priority boosted {old} -> HIGH "
+                                        f"(multiple thermal signals on boundary)",
+                                        "INFO",
+                                    )
+            self.update_probability_after_scan(x, y, False)
+            return (f"Thermal anomaly at ({x},{y}) — heat:{max_heat}, contrast:{heat_contrast:.0f}. NOT human.")
+        self.update_probability_after_scan(x, y, False)
         return f"Sector ({x},{y}) clear. Max heat: {max_heat}°C."
 
     def rescue_victim(self, drone_id: str) -> str:
@@ -782,6 +1002,49 @@ class SimulationState:
                     queue.append((nx, ny, new_path))
         # Fallback: direct step (grid should always be connected via non-lake cells)
         return [[x1, y1]]
+
+    def compute_smart_transit(
+        self, x0: int, y0: int, x1: int, y1: int, max_detour: int = 3
+    ) -> List[List[int]]:
+        """BFS transit that detours through nearby unscanned city/forest cells
+        when the detour cost is within max_detour extra steps.
+        Returns a path from (x0,y0) to (x1,y1) — possibly longer than shortest."""
+        base_path = self.compute_path(x0, y0, x1, y1)
+        base_cost = len(base_path)
+        if base_cost == 0:
+            return base_path
+
+        # Collect unscanned high-value cells near the base path
+        path_set = set((c[0], c[1]) for c in base_path)
+        path_set.add((x0, y0))
+        candidates: List[tuple] = []
+        for px, py in path_set:
+            for dx in range(-2, 3):
+                for dy in range(-2, 3):
+                    nx, ny = px + dx, py + dy
+                    if (0 <= nx < GRID_W and 0 <= ny < GRID_H
+                            and not self.zone.scanned_cells[ny][nx]
+                            and not self.is_inaccessible(nx, ny)
+                            and (nx, ny) not in path_set
+                            and self.zone.terrain_types[ny][nx] in ('city', 'forest')):
+                        candidates.append((nx, ny))
+
+        if not candidates:
+            return base_path
+
+        # Score candidates by terrain value, pick best one within detour budget
+        candidates.sort(
+            key=lambda c: -TERRAIN_SCAN_WEIGHT.get(self.zone.terrain_types[c[1]][c[0]], 1)
+        )
+
+        for cx, cy in candidates[:5]:  # Try top 5 candidates
+            leg_a = self.compute_path(x0, y0, cx, cy)
+            leg_b = self.compute_path(cx, cy, x1, y1)
+            detour_cost = len(leg_a) + len(leg_b)
+            if detour_cost <= base_cost + max_detour:
+                return leg_a + leg_b
+
+        return base_path
 
     def get_unscanned_cells(self) -> List[List[int]]:
         return [
