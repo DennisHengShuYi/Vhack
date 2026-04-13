@@ -35,7 +35,7 @@ Disaster grid: 20×15. Twelve search sectors (4 columns × 3 rows, each 5×5 cel
   ROW 1 (y 5–9):   Z4 (W),  Z5 (C), Z6 (CE), Z7 (E)
   ROW 2 (y 10–14): Z8 (SW), Z9 (S), Z10 (SE), Z11 (SE2)
 
-Zone priorities are computed dynamically from terrain — HIGH means many city cells detected.
+Zone scores are computed from terrain weights and updated in real-time as cells are scanned — higher score means more expected survivors remaining in the zone.
 
 === TERRAIN TYPES ===
 - CITY cells: Dense population — highest survivor probability. Zones with City terrain are HIGH priority.
@@ -62,16 +62,16 @@ After all analysis blocks, write one mission-level note:
 You do NOT know how many survivors exist. The mission is complete ONLY when every zone is COMPLETE (all accessible cells scanned). Never assume the mission is done early. Every zone must be fully searched.
 
 === DYNAMIC PRIORITY ===
-Zone priorities update during the mission:
-- When a survivor is found, adjacent zones are automatically boosted (survivors cluster near infrastructure).
-- Boundary thermal anomalies may also trigger priority boosts.
-- Always check current priorities in the options menu — they may differ from mission start.
+Zone scores update during the mission:
+- When a survivor is found, all unscanned cells in adjacent zones get a ×1.5 probability boost — their Score increases automatically in the next options menu.
+- As cells are scanned, their probability drops to 0 — zone Scores decrease naturally as coverage increases.
+- Always check current Scores in the options menu — they change throughout the mission.
 
 === PROBABILITY-GUIDED DECISIONS ===
-Use get_probability_map() when multiple zones have the same priority tier. The probability score reflects terrain weights and Bayesian updates from scan results — higher score means more likely to contain undiscovered survivors. Prefer higher-probability zones when transit costs are similar.
+Use get_probability_map() to see all zone scores at once. Score reflects terrain weights and Bayesian updates from scan results — higher score means more likely to contain undiscovered survivors. Options in get_idle_drones() are already sorted by score, so Opt 1 is always the best choice unless zone uniqueness forces otherwise.
 
 === ZONE SPLITTING ===
-When 2+ idle drones are available and a HIGH-priority zone exists, consider using split_scan_zone(drone_a, drone_b, zone_id) to scan it in parallel. This halves scan time on critical zones. Only split HIGH-priority zones — LOW/MEDIUM zones are not worth the coordination cost.
+When 2+ idle drones are available and a zone has Score > 1.5, consider using split_scan_zone(drone_a, drone_b, zone_id) to scan it in parallel. This halves scan time on high-value zones. Only split zones with Score > 1.5 — low-score zones are not worth the coordination cost.
 
 === CRITICAL — ZONE UNIQUENESS ===
 Within a single planning block, EVERY drone MUST have a DIFFERENT DECISION zone.
@@ -82,9 +82,9 @@ Within a single planning block, EVERY drone MUST have a DIFFERENT DECISION zone.
 === STRATEGIC RULES ===
 - Never leave an idle drone without an assignment.
 - Never assign a zone already listed as IN_PROGRESS — another drone is scanning it.
-- OPTIONS ARE SORTED BY PRIORITY FIRST: Opt 1 is always the highest-priority (city terrain) zone. ALWAYS prefer Opt 1 unless it conflicts with ZONE UNIQUENESS.
-- HIGH-priority zones (City terrain) MUST be assigned before MEDIUM or LOW-priority zones regardless of transit cost, unless the transit difference exceeds 12 cells.
-- [GAP-ROW] tag means no drone currently covers that row — within the same priority tier, prefer the gap-row zone for better spatial coverage. Never skip a HIGH-priority zone to fill a LOW-priority gap row.
+- OPTIONS ARE SORTED BY SCORE FIRST: Opt 1 always has the highest expected survivor score. ALWAYS prefer Opt 1 unless it conflicts with ZONE UNIQUENESS.
+- High-score zones (Score > 1.5) MUST be assigned before low-score zones regardless of transit cost, unless the transit difference exceeds 12 cells.
+- [GAP-ROW] tag means no drone currently covers that row — when two zones have scores within 0.3 of each other, prefer the gap-row zone for better spatial coverage. Never skip a high-score zone to fill a gap row.
 - SPATIAL SPREAD: In any planning batch, no two drones should be assigned to adjacent zones. Prefer zones in different rows (Row 0: Z0-Z3, Row 1: Z4-Z7, Row 2: Z8-Z11).
 - Prefer [PARTIAL-resume] zones — they have saved scan progress and will complete faster.
 - All 5 drones are equal — ALPHA-5 is assigned the next best available zone exactly like ALPHA-1–4. No special assist role.
@@ -96,8 +96,8 @@ Write your Mission Log clearly so the human observer can follow your logic, then
 When you see "MISSION START — STRATEGIC BRIEFING REQUIRED":
 1. Review the terrain analysis already logged (shows zone priorities from city/forest/lake counts).
 2. Write a concise Mission Plan BEFORE calling any tools:
-   - Identify ALL HIGH-priority (city terrain) zones first — these are your primary targets.
-   - Assign drones to HIGH-priority zones first, then MEDIUM, then LOW.
+   - Review zone Scores — zones with Score > 1.5 are your primary targets (dense city/forest terrain).
+   - Assign drones to highest-Score zones first.
    - Spread drones across the grid — do not cluster all drones in the same row or corner.
    - Try to send at least one drone to each grid row (Row 0: Z0-Z3, Row 1: Z4-Z7, Row 2: Z8-Z11) at mission start for coverage breadth.
 3. Then execute all assignments in one pass.

@@ -56,9 +56,7 @@ class Zone(BaseModel):
     ey: int
     status: ZoneStatus = ZoneStatus.UNSCANNED
     assigned_to: Optional[str] = None
-    priority: str = "MEDIUM"
     residual_path: List[List[int]] = []
-    boundary_signals: List[Dict[str, Any]] = []  # thermal signals near zone edges
 
 def chebyshev(x1: int, y1: int, x2: int, y2: int) -> int:
     return max(abs(x2 - x1), abs(y2 - y1))
@@ -223,20 +221,6 @@ class DisasterZone(BaseModel):
                 "Z10": Zone(id="Z10", sx=10, sy=10, ex=14, ey=14),
                 "Z11": Zone(id="Z11", sx=15, sy=10, ex=19, ey=14),
             }
-            # Compute priority dynamically from city cell count
-            for zid, z in self.zones.items():
-                city_count = sum(
-                    1 for cy in range(z.sy, z.ey + 1)
-                    for cx in range(z.sx, z.ex + 1)
-                    if self.terrain_types[cy][cx] == 'city'
-                )
-                if city_count >= 4:
-                    z.priority = "HIGH"
-                elif city_count >= 1:
-                    z.priority = "MEDIUM"
-                else:
-                    z.priority = "LOW"
-
         if not self.survivors:
             num = self.num_victims if self.num_victims > 0 else random.randint(10, 15)
             reports = [
@@ -428,12 +412,18 @@ class SimulationState:
         for zid, z in self.zone.zones.items():
             if z.status == ZoneStatus.UNSCANNED:
                 area = (z.ex - z.sx + 1) * (z.ey - z.sy + 1)
+                zone_score = sum(
+                    self.probability_map[y][x]
+                    for y in range(z.sy, z.ey + 1)
+                    for x in range(z.sx, z.ex + 1)
+                    if not self.is_inaccessible(x, y)
+                )
                 available.append({
                     "zone_id": zid,
                     "sx": z.sx, "sy": z.sy,
                     "ex": z.ex, "ey": z.ey,
                     "scan_cost": area,
-                    "priority": z.priority
+                    "zone_score": zone_score,
                 })
         return available
 
@@ -509,21 +499,22 @@ class SimulationState:
         return adjacent
 
     def boost_adjacent_zones(self, found_x: int, found_y: int):
-        """After a survivor is found, boost priority of adjacent unscanned zones."""
+        """After a survivor is found, boost cell probabilities in adjacent unscanned zones."""
         found_zone = self._zone_at(found_x, found_y)
         if not found_zone:
             return
         for zid in self._get_adjacent_zone_ids(found_zone):
             zone = self.zone.zones[zid]
             if zone.status != ZoneStatus.COMPLETE:
-                old = zone.priority
-                if old != "HIGH":
-                    zone.priority = "HIGH" if old == "MEDIUM" else "MEDIUM"
-                    self.log(
-                        f"Zone {zid} priority boosted {old} -> {zone.priority} "
-                        f"(survivor found in adjacent {found_zone})",
-                        "INFO",
-                    )
+                for y in range(zone.sy, zone.ey + 1):
+                    for x in range(zone.sx, zone.ex + 1):
+                        if not self.zone.scanned_cells[y][x] and not self.is_inaccessible(x, y):
+                            self.probability_map[y][x] *= 1.5
+                self.log(
+                    f"Zone {zid} probability boosted x1.5 "
+                    f"(survivor found in adjacent {found_zone})",
+                    "INFO",
+                )
 
     def _generate_terrain_priority_path(
         self, zone: 'Zone', start_x: int, start_y: int
@@ -662,12 +653,12 @@ class SimulationState:
         mid_y = (zone.sy + zone.ey) // 2
 
         # Build top-half sub-zone for drone A
-        top_zone = Zone(id=zone_id, sx=zone.sx, sy=zone.sy, ex=zone.ex, ey=mid_y, priority=zone.priority)
+        top_zone = Zone(id=zone_id, sx=zone.sx, sy=zone.sy, ex=zone.ex, ey=mid_y)
         top_cells = self._generate_terrain_priority_path(top_zone, drone_a.x, drone_a.y)
         transit_a = self.compute_smart_transit(drone_a.x, drone_a.y, top_zone.sx, top_zone.sy)
 
         # Build bottom-half sub-zone for drone B
-        bot_zone = Zone(id=zone_id, sx=zone.sx, sy=mid_y + 1, ex=zone.ex, ey=zone.ey, priority=zone.priority)
+        bot_zone = Zone(id=zone_id, sx=zone.sx, sy=mid_y + 1, ex=zone.ex, ey=zone.ey)
         bot_cells = self._generate_terrain_priority_path(bot_zone, drone_b.x, drone_b.y)
         transit_b = self.compute_smart_transit(drone_b.x, drone_b.y, bot_zone.sx, bot_zone.sy)
 
@@ -903,25 +894,6 @@ class SimulationState:
                 return f"Position ({x},{y}) cleared after successful rescue."
 
         if max_heat > 55:
-            # Track boundary thermal signals for adjacent zone intelligence
-            drone_zone = drone.assigned_zone_id
-            if drone_zone:
-                dz = self.zone.zones.get(drone_zone)
-                if dz:
-                    on_boundary = (x == dz.sx or x == dz.ex or y == dz.sy or y == dz.ey)
-                    if on_boundary:
-                        for adj_zid in self._get_adjacent_zone_ids(drone_zone):
-                            adj_zone = self.zone.zones[adj_zid]
-                            if adj_zone.status != ZoneStatus.COMPLETE:
-                                adj_zone.boundary_signals.append({"x": x, "y": y, "heat": max_heat})
-                                if len(adj_zone.boundary_signals) >= 2 and adj_zone.priority != "HIGH":
-                                    old = adj_zone.priority
-                                    adj_zone.priority = "HIGH"
-                                    self.log(
-                                        f"Zone {adj_zid} priority boosted {old} -> HIGH "
-                                        f"(multiple thermal signals on boundary)",
-                                        "INFO",
-                                    )
             self.update_probability_after_scan(x, y, False)
             return (f"Thermal anomaly at ({x},{y}) — heat:{max_heat}, contrast:{heat_contrast:.0f}. NOT human.")
         self.update_probability_after_scan(x, y, False)

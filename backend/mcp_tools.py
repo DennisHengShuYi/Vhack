@@ -63,7 +63,7 @@ def register_tools(mcp):
     @mcp.tool()
     def get_grid_state() -> str:
         """
-        Returns the state of all 12 search zones: status, priority, assignment, and scan progress.
+        Returns the state of all 12 search zones: status, score, assignment, and scan progress.
         Use this to identify UNSCANNED zones available for assignment.
         """
         sim = shared.sim
@@ -76,11 +76,17 @@ def register_tools(mcp):
                 if sim.zone.scanned_cells[cy][cx]
             )
             pct = int(100 * scanned / total) if total > 0 else 0
+            zone_score = sum(
+                sim.probability_map[cy][cx]
+                for cy in range(z.sy, z.ey + 1)
+                for cx in range(z.sx, z.ex + 1)
+                if not sim.is_inaccessible(cx, cy)
+            )
             assigned = f" → {z.assigned_to}" if z.assigned_to else ""
             has_residual = " [has residual path]" if z.residual_path else ""
             lines.append(
                 f"  {zid} ({z.sx},{z.sy})-({z.ex},{z.ey}): {z.status.value} | "
-                f"Priority={z.priority} | Scanned={pct}%{assigned}{has_residual}"
+                f"Score={zone_score:.2f} | Scanned={pct}%{assigned}{has_residual}"
             )
         return "\n".join(lines)
 
@@ -242,9 +248,9 @@ def register_tools(mcp):
             report.insert(0, (
                 "=== MISSION START — STRATEGIC BRIEFING REQUIRED ===\n"
                 "Before assigning any drones, write a Mission Plan in the log:\n"
-                "  1. Which zones are HIGH priority and why (terrain composition)\n"
+                "  1. Which zones have the highest Score (expected survivors) and why\n"
                 "  2. Your intended drone-to-zone mapping for the first wave\n"
-                "  3. Any zones you will defer (LOW priority or battery risk)\n"
+                "  3. Any zones you will defer (low score or battery risk)\n"
                 "Then proceed with assign_scan_zone() calls for all idle drones."
             ))
 
@@ -330,7 +336,7 @@ def register_tools(mcp):
                     "scan": scan_cost_actual,
                     "return": return_cost,
                     "total": total_needed,
-                    "priority": z["priority"],
+                    "zone_score": z["zone_score"],
                     "terrain": terrain_str,
                     "scan_pct": scan_pct,
                     "zone_row": zone_row,
@@ -338,9 +344,9 @@ def register_tools(mcp):
                 })
 
             options.sort(key=lambda x: (
-                # 1st: city terrain priority — HIGH > MEDIUM > LOW
-                0 if x["priority"] == "HIGH" else (1 if x["priority"] == "MEDIUM" else 2),
-                # 2nd: gap rows as tiebreaker within same priority tier
+                # 1st: highest probability score first
+                -x["zone_score"],
+                # 2nd: gap rows as tiebreaker within similar scores
                 0 if x["row_gap"] else 1,
                 # 3rd: nearest first
                 x["transit"]
@@ -358,7 +364,7 @@ def register_tools(mcp):
                     gap_tag = " [GAP-ROW: no drone in this sector]" if opt["row_gap"] else ""
                     report.append(
                         f"  Opt {i+1}: assign_scan_zone(\"{d_id}\", \"{opt['zone_id']}\") "
-                        f"- Priority={opt['priority']}, Transit={opt['transit']}, Cost={opt['total']}, "
+                        f"- Score={opt['zone_score']:.2f}, Transit={opt['transit']}, Cost={opt['total']}, "
                         f"Risk={risk}, Terrain=[{opt['terrain']}], Scanned={opt['scan_pct']}%{partial}{gap_tag}"
                     )
 
@@ -396,9 +402,15 @@ def register_tools(mcp):
                 if sim.zone.scanned_cells[cy][cx]
             )
             remaining = total_cells - scanned_cells
+            zone_score = sum(
+                sim.probability_map[cy][cx]
+                for cy in range(z.sy, z.ey + 1)
+                for cx in range(z.sx, z.ex + 1)
+                if not sim.is_inaccessible(cx, cy)
+            )
             assigned_str = f" [{z.assigned_to}]" if z.assigned_to else ""
             lines.append(
-                f"  {zid} ({z.priority}): {remaining}/{total_cells} cells unscanned | "
+                f"  {zid} (Score:{zone_score:.2f}): {remaining}/{total_cells} cells unscanned | "
                 f"{z.status.value}{assigned_str}"
             )
 
@@ -477,12 +489,11 @@ def register_tools(mcp):
                 for x in range(z.sx, z.ex + 1)
                 if not sim.zone.scanned_cells[y][x] and not sim.is_inaccessible(x, y)
             )
-            zone_probs.append((zid, zone_prob, unscanned, z.status.value, z.priority))
+            zone_probs.append((zid, zone_prob, unscanned, z.status.value))
         zone_probs.sort(key=lambda x: -x[1])
-        for zid, prob, unscanned, status, priority in zone_probs:
+        for zid, prob, unscanned, status in zone_probs:
             lines.append(
-                f"  {zid}: probability={prob:.3f} | unscanned={unscanned} cells | "
-                f"status={status} | priority={priority}"
+                f"  {zid}: score={prob:.3f} | unscanned={unscanned} cells | status={status}"
             )
         return "\n".join(lines)
 
@@ -609,9 +620,9 @@ def register_tools(mcp):
     @mcp.tool()
     def split_scan_zone(drone_a_id: str, drone_b_id: str, zone_id: str) -> str:
         """
-        Splits a HIGH-priority zone between two drones for parallel scanning.
+        Splits a high-score zone between two drones for parallel scanning.
         Drone A takes the top half, Drone B takes the bottom half.
-        Use only for HIGH-priority zones when 2+ idle drones are nearby.
+        Use when a zone has Score > 1.5 and 2+ idle drones are available.
         Args:
             drone_a_id: First drone (e.g. 'ALPHA-1') — scans top half.
             drone_b_id: Second drone (e.g. 'ALPHA-2') — scans bottom half.
@@ -653,8 +664,7 @@ def register_tools(mcp):
     def reassign_drone(drone_id: str, zone_id: str) -> str:
         """
         Force-reassigns a drone to a different zone even if it has an active assignment.
-        Use only in high-priority scenarios (e.g. a HIGH-priority zone just opened up
-        and this drone is better positioned than any idle drone).
+        Use when a high-score zone just opened up and this drone is better positioned than any idle drone.
         Args:
             drone_id: The drone to reassign (e.g. 'ALPHA-3').
             zone_id: The new zone to assign (e.g. 'Z7').
@@ -698,25 +708,3 @@ def register_tools(mcp):
 
         return f"SUCCESS: {drone_id} force-reassigned to {zone_id}. {result['message']}"
 
-    @mcp.tool()
-    def prioritize_zone(zone_id: str, priority: str) -> str:
-        """
-        Dynamically updates the priority of a search zone based on agent reasoning.
-        Use when terrain analysis or survivor intel suggests a zone needs more/less urgency.
-        Args:
-            zone_id: Zone to reprioritize (e.g. 'Z5').
-            priority: New priority level — must be 'HIGH', 'MEDIUM', or 'LOW'.
-        """
-        sim = shared.sim
-        zone = sim.zone.zones.get(zone_id)
-        if not zone:
-            return f"Error: Zone {zone_id} not found."
-
-        priority = priority.upper()
-        if priority not in ("HIGH", "MEDIUM", "LOW"):
-            return f"Error: Invalid priority '{priority}'. Must be HIGH, MEDIUM, or LOW."
-
-        old = zone.priority
-        zone.priority = priority
-        sim.log(f"🎯 AGENT: Zone {zone_id} priority updated {old} → {priority}.", "AI")
-        return f"Zone {zone_id} priority changed from {old} to {priority}."
