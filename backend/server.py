@@ -103,6 +103,10 @@ async def run_simulation_loop():
             sim.tick_count += 1
             sim.simulate_heartbeats()
 
+            # Survivor mobility: move mobile survivors every 5 ticks
+            if sim.tick_count % 5 == 0:
+                sim.simulate_survivor_movement()
+
             # Loop A: advance each drone one step
             if sim.mission_active:
                 for d_id, drone in list(sim.drones.items()):

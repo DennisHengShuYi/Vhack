@@ -1072,6 +1072,11 @@ class SimulationState:
                 s["rescued"] = True
                 self.total_rescued += 1
                 self.metrics.victims_rescued += 1
+                # Clear any stale sighting for this rescued victim
+                self.stale_sightings = [
+                    st for st in self.stale_sightings
+                    if st["victim_id"] != s["id"]
+                ]
                 drone.is_waiting_response = False
                 drone.victim_report = None
                 drone.status = "IDLE"
@@ -1233,4 +1238,5 @@ class SimulationState:
                 "grid_h": GRID_H,
             },
             "metrics": self.metrics.to_dict(),
+            "stale_sightings": self.stale_sightings,
         }
