@@ -68,7 +68,8 @@ def test_charge_step_increments_charges():
     drone = list(sim.drones.values())[0]
     drone.is_active = True
     drone.battery = 0.0
+    drone.x, drone.y = sim.base_station  # Position drone at base
     drone_id = drone.id
     sim.metrics.init_drone(drone_id)
     sim.charge_step(drone_id)
-    assert sim.metrics.per_drone[drone_id].charges_count >= 0  # called without error
+    assert sim.metrics.per_drone[drone_id].charges_count == 1

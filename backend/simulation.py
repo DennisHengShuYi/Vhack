@@ -992,14 +992,9 @@ class SimulationState:
                 self.update_probability_after_scan(x, y, False)
                 return f"Position ({x},{y}) cleared after successful rescue."
 
-        # Track false positives: thermal triggered but no victim at this cell
+        # Track false positives: thermal triggered but no survivor at this cell
         if model_detected:
-            has_victim = any(
-                s["x"] == x and s["y"] == y and not s["rescued"]
-                for s in self.zone.survivors
-            )
-            if not has_victim:
-                self.metrics.false_positives += 1
+            self.metrics.false_positives += 1
 
         if max_heat > 55:
             self.update_probability_after_scan(x, y, False)
