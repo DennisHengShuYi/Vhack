@@ -1172,4 +1172,5 @@ class SimulationState:
                 "grid_w": GRID_W,
                 "grid_h": GRID_H,
             },
+            "metrics": self.metrics.to_dict(),
         }
