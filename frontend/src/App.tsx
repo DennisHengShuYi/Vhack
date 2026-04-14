@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import Map3D from './components/Map3D';
+import MetricsPanel from './components/MetricsPanel';
 
 // --- Constants ---
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
@@ -756,6 +757,13 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
             </div>
           )}
         </section>
+
+        {/* Metrics Panel */}
+        <MetricsPanel
+          metrics={state?.metrics ?? null}
+          elapsedTs={state?.stats?.elapsed_ts ?? 'T+00:00'}
+          staleSightings={state?.stale_sightings?.length ?? 0}
+        />
 
         {/* Right Side: Agent Reasoning Log */}
         <section className="log-panel">
