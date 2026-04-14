@@ -661,6 +661,7 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
                 baseX={baseX}
                 baseY={baseY}
                 showRtbOnly={showRtbOnly}
+                staleSightings={state?.stale_sightings ?? []}
               />
             </div>
           ) : (

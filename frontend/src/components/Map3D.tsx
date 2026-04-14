@@ -18,6 +18,14 @@ type Survivor = {
   y: number;
   found?: boolean;
   rescued?: boolean;
+  is_mobile?: boolean;
+};
+
+type StaleSighting = {
+  x: number;
+  y: number;
+  victim_id: string;
+  stale_since_tick: number;
 };
 
 type Zone = {
@@ -33,6 +41,7 @@ type Props = {
   baseX: number;
   baseY: number;
   showRtbOnly: boolean;
+  staleSightings?: StaleSighting[];
 };
 
 const GRID_W = 20;
@@ -72,7 +81,7 @@ function isReturning(drone: Drone) {
   );
 }
 
-export default function Map3D({ zone, drones, baseX, baseY, showRtbOnly }: Props) {
+export default function Map3D({ zone, drones, baseX, baseY, showRtbOnly, staleSightings = [] }: Props) {
   const visibleDrones = showRtbOnly ? drones.filter(isReturning) : drones;
 
   return (
@@ -188,6 +197,14 @@ export default function Map3D({ zone, drones, baseX, baseY, showRtbOnly }: Props
                 </mesh>
               )}
 
+              {/* Mobile survivor pulse ring */}
+              {survivorAtPos?.is_mobile && !isVictimRescued && (
+                <mesh position={[wx, terrainHeight(survivorAtPos.x, survivorAtPos.y, zone.terrain_types[survivorAtPos.y]?.[survivorAtPos.x] ?? 'flat') + 0.3, wz]}>
+                  <torusGeometry args={[0.35, 0.04, 8, 24]} />
+                  <meshStandardMaterial color="#facc15" emissive="#facc15" emissiveIntensity={1.5} transparent opacity={0.85} />
+                </mesh>
+              )}
+
               {isVictimRescued && (
                 <group position={[wx, h + 0.05, wz]}>
                   {/* Ground Circle */}
@@ -207,6 +224,30 @@ export default function Map3D({ zone, drones, baseX, baseY, showRtbOnly }: Props
                   </mesh>
                 </group>
               )}
+            </group>
+          );
+        })}
+
+        {/* Stale sighting markers */}
+        {staleSightings.map((st, i) => {
+          const terrain = zone.terrain_types[st.y]?.[st.x] ?? 'flat';
+          const { wx, wz } = toWorld(st.x, st.y);
+          const yPos = terrainHeight(st.x, st.y, terrain) + 0.5;
+          return (
+            <group key={`stale-${st.victim_id}-${i}`}>
+              <mesh position={[wx, yPos, wz]}>
+                <sphereGeometry args={[0.18, 8, 8]} />
+                <meshStandardMaterial color="#f97316" emissive="#f97316" emissiveIntensity={1.0} transparent opacity={0.6} />
+              </mesh>
+              <Text
+                position={[wx, yPos + 0.28, wz]}
+                fontSize={0.22}
+                color="#f97316"
+                anchorX="center"
+                anchorY="middle"
+              >
+                ?
+              </Text>
             </group>
           );
         })}
