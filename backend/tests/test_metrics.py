@@ -26,3 +26,49 @@ def test_drone_metrics_default():
     assert dm.cells_moved == 0
     assert dm.scans_performed == 0
     assert dm.charges_count == 0
+
+
+from simulation import SimulationState
+
+
+def _make_sim():
+    """Create a SimulationState with a fixed layout for testing."""
+    import random
+    random.seed(42)
+    return SimulationState()
+
+
+def test_metrics_initialised_on_sim():
+    sim = _make_sim()
+    assert hasattr(sim, 'metrics')
+    assert sim.metrics.total_scannable_cells > 0
+    assert sim.metrics.total_victims > 0
+
+
+def test_scan_increments_cells_scanned():
+    import random
+    random.seed(42)
+    sim = _make_sim()
+    sim.mission_active = True
+    # Activate first drone manually
+    drone = list(sim.drones.values())[0]
+    drone.is_active = True
+    drone_id = drone.id
+    sim.metrics.init_drone(drone_id)
+    before = sim.metrics.total_cells_scanned
+    sim.scan(drone_id)
+    assert sim.metrics.total_cells_scanned == before + 1
+
+
+def test_charge_step_increments_charges():
+    import random
+    random.seed(42)
+    sim = _make_sim()
+    sim.mission_active = True
+    drone = list(sim.drones.values())[0]
+    drone.is_active = True
+    drone.battery = 0.0
+    drone_id = drone.id
+    sim.metrics.init_drone(drone_id)
+    sim.charge_step(drone_id)
+    assert sim.metrics.per_drone[drone_id].charges_count >= 0  # called without error

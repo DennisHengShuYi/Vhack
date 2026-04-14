@@ -383,6 +383,17 @@ class SimulationState:
         self.streaming_text: str = ""              # Live LLM token buffer for real-time frontend display
         self.reserved_zones: Dict[str, str] = {}  # zone_id → drone_id that will cover residual
         self.probability_map: List[List[float]] = self._init_probability_map()
+        # ── Mission Metrics ──────────────────────────────────────────────
+        self.metrics = MissionMetrics(
+            total_scannable_cells=sum(
+                1 for y in range(GRID_H) for x in range(GRID_W)
+                if not self.zone.hazard_cells[y][x]
+            ),
+            total_victims=len(self.zone.survivors),
+        )
+        # Initialise per-drone slots for all drones that exist at spawn
+        for d_id in self.drones:
+            self.metrics.init_drone(d_id)
 
     def _sample_unique_points(self, count: int) -> List[tuple]:
         cells = [(x, y) for y in range(GRID_H) for x in range(GRID_W)]
@@ -883,6 +894,10 @@ class SimulationState:
         if (drone.x, drone.y) != (drone.base_x, drone.base_y):
             return (f"ERROR: {drone_id} must be at base ({drone.base_x},{drone.base_y}). "
                     f"Currently at ({drone.x},{drone.y}).")
+        self.metrics.init_drone(drone_id)
+        # Track charge events (one increment per charge session start)
+        if not drone.is_charging:
+            self.metrics.per_drone[drone_id].charges_count += 1
         drone.is_charging = True
         drone.returning_to_base = False
         drone.battery = min(100.0, drone.battery + CHARGE_RATE)
@@ -914,6 +929,13 @@ class SimulationState:
         drone.battery = max(0.0, drone.battery - BATTERY_DRAIN_SCAN)
         x, y = drone.x, drone.y
         self.zone.scanned_cells[y][x] = True
+        # ── Metrics: unique cell count ──────────────────────────────────
+        self.metrics.total_cells_scanned = sum(
+            1 for sy in range(GRID_H) for sx in range(GRID_W)
+            if self.zone.scanned_cells[sy][sx] and not self.zone.hazard_cells[sy][sx]
+        )
+        self.metrics.init_drone(drone_id)
+        self.metrics.per_drone[drone_id].scans_performed += 1
         drone.status_label = "SCANNING"
 
         matrix = self.generate_thermal_matrix(x, y)
@@ -939,6 +961,9 @@ class SimulationState:
                 drone.status = "IDLE"
                 drone.status_label = "VICTIM DETECTED"
                 self.total_victims_found += 1
+                self.metrics.victims_found += 1
+                self.metrics.true_positives += 1
+                survivor["last_seen_tick"] = self.tick_count
                 self.boost_adjacent_zones(x, y)  # NEW: dynamic priority update
                 self.update_probability_after_scan(x, y, True)
                 drone.last_thermal_scan = {
@@ -967,6 +992,15 @@ class SimulationState:
                 self.update_probability_after_scan(x, y, False)
                 return f"Position ({x},{y}) cleared after successful rescue."
 
+        # Track false positives: thermal triggered but no victim at this cell
+        if model_detected:
+            has_victim = any(
+                s["x"] == x and s["y"] == y and not s["rescued"]
+                for s in self.zone.survivors
+            )
+            if not has_victim:
+                self.metrics.false_positives += 1
+
         if max_heat > 55:
             self.update_probability_after_scan(x, y, False)
             return (f"Thermal anomaly at ({x},{y}) — heat:{max_heat}, contrast:{heat_contrast:.0f}. NOT human.")
@@ -982,6 +1016,7 @@ class SimulationState:
                     and s["found"] and not s["rescued"]):
                 s["rescued"] = True
                 self.total_rescued += 1
+                self.metrics.victims_rescued += 1
                 drone.is_waiting_response = False
                 drone.victim_report = None
                 drone.status = "IDLE"
