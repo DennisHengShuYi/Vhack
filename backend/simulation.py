@@ -5,6 +5,7 @@ This is the core simulation that the MCP tools control.
 import random
 import time
 import math
+from dataclasses import dataclass, field as dc_field
 from enum import Enum
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
@@ -44,7 +45,6 @@ CONDITION_POOL = [
 ]
 
 # ─── Mission Metrics ──────────────────────────────────────────────────────────
-from dataclasses import dataclass, field as dc_field
 
 @dataclass
 class DroneMetrics:
