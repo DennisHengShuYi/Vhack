@@ -63,7 +63,7 @@ def test_position_history_appended_on_move():
     mobile_s = next((s for s in sim.zone.survivors if s["is_mobile"] and not s["rescued"]), None)
     assert mobile_s is not None, "No mobile survivor found"
     initial_len = len(mobile_s["position_history"])
-    for _ in range(30):
+    for _ in range(50):
         sim.simulate_survivor_movement()
-    # With 30 calls at 30% chance, at least one move is statistically certain
-    assert len(mobile_s["position_history"]) >= initial_len
+    # With 50 calls at 30% chance, at least one move is statistically certain (~99.9999%)
+    assert len(mobile_s["position_history"]) > initial_len
