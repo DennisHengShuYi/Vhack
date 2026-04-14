@@ -43,6 +43,80 @@ CONDITION_POOL = [
     "MOBILE_HEALTHY",
 ]
 
+# ─── Mission Metrics ──────────────────────────────────────────────────────────
+from dataclasses import dataclass, field as dc_field
+
+@dataclass
+class DroneMetrics:
+    drone_id: str
+    cells_moved: int = 0
+    scans_performed: int = 0
+    battery_used: float = 0.0   # total % drained this mission
+    charges_count: int = 0
+    idle_ticks: int = 0
+    current_battery: float = 100.0
+
+@dataclass
+class MissionMetrics:
+    total_scannable_cells: int = 0
+    total_victims: int = 0
+    total_cells_scanned: int = 0
+    victims_found: int = 0
+    victims_rescued: int = 0
+    true_positives: int = 0
+    false_positives: int = 0
+    thermal_threshold_config: dict = dc_field(
+        default_factory=lambda: {"min_heat": 78, "min_contrast": 28}
+    )
+    per_drone: dict = dc_field(default_factory=dict)  # drone_id → DroneMetrics
+
+    @property
+    def coverage_percent(self) -> float:
+        if self.total_scannable_cells == 0:
+            return 0.0
+        return round(self.total_cells_scanned / self.total_scannable_cells * 100, 1)
+
+    @property
+    def detection_rate_percent(self) -> float:
+        if self.total_victims == 0:
+            return 0.0
+        return round(self.victims_found / self.total_victims * 100, 1)
+
+    @property
+    def cells_per_full_charge(self) -> float:
+        return (100.0 - LOW_BATTERY_THRESHOLD) / BATTERY_DRAIN_MOVE
+
+    def init_drone(self, drone_id: str) -> None:
+        if drone_id not in self.per_drone:
+            self.per_drone[drone_id] = DroneMetrics(drone_id=drone_id)
+
+    def to_dict(self) -> dict:
+        return {
+            "total_scannable_cells": self.total_scannable_cells,
+            "total_victims": self.total_victims,
+            "total_cells_scanned": self.total_cells_scanned,
+            "victims_found": self.victims_found,
+            "victims_rescued": self.victims_rescued,
+            "true_positives": self.true_positives,
+            "false_positives": self.false_positives,
+            "coverage_percent": self.coverage_percent,
+            "detection_rate_percent": self.detection_rate_percent,
+            "cells_per_full_charge": self.cells_per_full_charge,
+            "thermal_threshold_config": self.thermal_threshold_config,
+            "per_drone": {
+                k: {
+                    "drone_id": v.drone_id,
+                    "cells_moved": v.cells_moved,
+                    "scans_performed": v.scans_performed,
+                    "battery_used": round(v.battery_used, 1),
+                    "charges_count": v.charges_count,
+                    "idle_ticks": v.idle_ticks,
+                    "current_battery": round(v.current_battery, 1),
+                }
+                for k, v in self.per_drone.items()
+            },
+        }
+
 class ZoneStatus(Enum):
     UNSCANNED = "UNSCANNED"
     IN_PROGRESS = "IN_PROGRESS"
