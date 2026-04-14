@@ -277,6 +277,22 @@ def register_tools(mcp):
             f"{coverage_pct}% grid covered, {s_found}/{len(sim.zone.survivors)} survivors found"
         )
 
+        # ── Stale sightings: high-priority re-scan options ────────────────
+        stale = getattr(sim, 'stale_sightings', [])
+        fresh_stale = [
+            st for st in stale
+            if (sim.tick_count - st.get("stale_since_tick", 0)) >= 10
+        ]
+        if fresh_stale:
+            report.append(f"\n⚠️  STALE SIGHTINGS — mobile survivors moved from last known position:")
+            for st in fresh_stale:
+                report.append(
+                    f"  RE-SCAN ({st['x']},{st['y']}) — victim {st['victim_id']} last seen "
+                    f"{sim.tick_count - st['stale_since_tick']} ticks ago. "
+                    f"Use assign_scan_zone() or voice-dispatch a drone to this coordinate. "
+                    f"PRIORITY: HIGH — known survivor may be nearby."
+                )
+
         # Determine which zone rows already have an active drone (to guide spread)
         # Grid has 3 rows of zones (row 0: y=0-4, row 1: y=5-9, row 2: y=10-14)
         zone_height = sim.zone.height
