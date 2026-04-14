@@ -344,6 +344,10 @@ class DisasterZone(BaseModel):
                     "triage_priority": CONDITION_TRIAGE[_cond],
                     "can_move": _can_move,
                     "notified_rescue": False,
+                    # ── Mobility fields ────────────────────────────────
+                    "is_mobile": _cond in ("MOBILE_HEALTHY", "MINOR_INJURY"),
+                    "last_seen_tick": None,
+                    "position_history": [],
                 })
 
 
@@ -394,6 +398,7 @@ class SimulationState:
         # Initialise per-drone slots for all drones that exist at spawn
         for d_id in self.drones:
             self.metrics.init_drone(d_id)
+        self.stale_sightings: List[Dict[str, Any]] = []
 
     def _sample_unique_points(self, count: int) -> List[tuple]:
         cells = [(x, y) for y in range(GRID_H) for x in range(GRID_W)]
@@ -815,6 +820,61 @@ class SimulationState:
                 drone.target_y = None
                 drone.path_queue = []
                 self.log(f"🔴 {d_id} lost connection — battery depleted.", "WARN", d_id)
+
+    def simulate_survivor_movement(self) -> None:
+        """
+        Called every 5 ticks. Mobile survivors (MOBILE_HEALTHY, MINOR_INJURY) that
+        have not been rescued have a 30% chance to drift to an adjacent non-hazard cell.
+        If the survivor was previously spotted (last_seen_tick is set), the old position
+        is added to stale_sightings.
+        """
+        if not self.mission_active:
+            return
+
+        dirs = [(-1,-1),(0,-1),(1,-1),(1,0),(1,1),(0,1),(-1,1),(-1,0)]
+
+        for s in self.zone.survivors:
+            if not s.get("is_mobile") or s["rescued"]:
+                continue
+
+            if random.random() > 0.30:
+                continue  # 70% chance: stays put this tick
+
+            old_x, old_y = s["x"], s["y"]
+
+            # Find valid adjacent non-hazard cells
+            candidates = [
+                (old_x + dx, old_y + dy)
+                for dx, dy in dirs
+                if (0 <= old_x + dx < self.zone.width
+                    and 0 <= old_y + dy < self.zone.height
+                    and not self.zone.hazard_cells[old_y + dy][old_x + dx])
+            ]
+            if not candidates:
+                continue
+
+            new_x, new_y = random.choice(candidates)
+            s["x"], s["y"] = new_x, new_y
+            s["position_history"].append({"x": old_x, "y": old_y, "tick": self.tick_count})
+
+            # If the survivor was previously spotted, record a stale sighting
+            if s.get("last_seen_tick") is not None and s.get("found") and not s["rescued"]:
+                # Remove any previous stale sighting for this victim
+                self.stale_sightings = [
+                    st for st in self.stale_sightings
+                    if st["victim_id"] != s["id"]
+                ]
+                self.stale_sightings.append({
+                    "x": old_x,
+                    "y": old_y,
+                    "victim_id": s["id"],
+                    "stale_since_tick": self.tick_count,
+                })
+                self.log(
+                    f"📍 MOBILE SURVIVOR {s['id']}: moved from ({old_x},{old_y}) → ({new_x},{new_y}). "
+                    f"Stale sighting recorded at ({old_x},{old_y}).",
+                    "INFO"
+                )
 
     def _ts(self) -> str:
         mt = self.mission_start_time
