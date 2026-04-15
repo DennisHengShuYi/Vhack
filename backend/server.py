@@ -24,6 +24,7 @@ import time
 import threading
 from contextlib import asynccontextmanager
 from typing import Optional, Any
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -738,6 +739,19 @@ async def _background_voice_command(message: str):
 
     except Exception as e:
         sim.log(f"❌ VOICE COMMAND ERROR: {type(e).__name__}: {e}", "AI")
+
+
+@app.get("/export-mission")
+async def export_mission():
+    """Return path and size of latest mission JSONL report."""
+    reports_dir = Path(__file__).parent.parent / "mission_reports"
+    if not reports_dir.exists():
+        return {"status": "no_reports", "path": None}
+    files = sorted(reports_dir.glob("*.jsonl"))
+    if not files:
+        return {"status": "no_reports", "path": None}
+    latest = files[-1]
+    return {"status": "ok", "path": str(latest), "size_bytes": latest.stat().st_size}
 
 
 # ─── MCP Tools ────────────────────────────────────────────────────────────────

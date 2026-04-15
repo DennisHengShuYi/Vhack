@@ -26,6 +26,7 @@ from dotenv import load_dotenv
 from agent.memory import MissionMemory
 from agent.contracts import ContractChecker
 from agent.fallback import WeightedPlanner
+from agent.session_log import SessionLog
 
 load_dotenv()
 
@@ -150,6 +151,8 @@ class AgentOrchestrator:
         self.memory = MissionMemory()
         self.contracts = ContractChecker()
         self.planner = WeightedPlanner()
+        self.session_log = SessionLog()
+        self._historical_intel: str = ""  # loaded on mission start, injected once
 
         openai_key = os.getenv("OPENAI_API_KEY")
         gemini_key = os.getenv("GEMINI_API_KEY")
@@ -306,12 +309,18 @@ class AgentOrchestrator:
                                 await self._broadcast_log(http_session,
                                     "🏁 MISSION COMPLETE — All survivors found. Recalling swarm to base.")
                                 await self._recall_all_drones(session, http_session)
+                                self.session_log.close()
                             break
 
                         # Reset memory and contracts on mission start
                         if "MISSION START" in poll_text:
                             self.memory.reset()
                             self.contracts.reset()
+                            self.session_log.start()
+                            self._historical_intel = self.session_log.load_insights()
+                            if self._historical_intel:
+                                await self._broadcast_log(http_session,
+                                    "📚 HISTORICAL INTEL loaded from prior missions.")
 
                         # ── PHASE 1.5: CONTRACT CHECK — fetch state, inject alerts ──
                         _state_for_contracts: dict = {}
@@ -324,6 +333,19 @@ class AgentOrchestrator:
                         except Exception as e:
                             print(f"[CONTRACT] State fetch failed: {e}", file=sys.stderr)
 
+                        # Log tick state to JSONL
+                        try:
+                            self.session_log.log_tick(
+                                tick=tick,
+                                state=_state_for_contracts,
+                                events=list(self.memory.tier0[-3:]),
+                                decision_type="pending",
+                                assignments=[],
+                                contract_alerts=alerts if 'alerts' in dir() else [],
+                            )
+                        except Exception:
+                            pass
+
                         # ── PHASE 2: EXECUTE (LLM or rule-based) ────────────
                         is_trivial = self._is_trivial(poll_text)
 
@@ -333,9 +355,14 @@ class AgentOrchestrator:
                             if memory_block:
                                 memory_block = "\n\n" + memory_block + "\n"
 
+                            historical_block = ""
+                            if self._historical_intel:
+                                historical_block = "\n\n" + self._historical_intel + "\n"
+                                self._historical_intel = ""  # inject once, then clear
+
                             messages = [
                                 SystemMessage(content=SYSTEM_PROMPT),
-                                HumanMessage(content=f"{memory_block}Execute assignments for these idle drones:\n\n{poll_text}")
+                                HumanMessage(content=f"{historical_block}{memory_block}Execute assignments for these idle drones:\n\n{poll_text}")
                             ]
                             try:
                                 async for state in agent_executor.astream(
