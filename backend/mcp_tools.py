@@ -28,6 +28,9 @@ import sys
 import shared
 from simulation import ZoneStatus, chebyshev, BATTERY_RETURN_RESERVE
 
+# Stale sighting advisory: only surface to agent after this many ticks without re-scan
+STALE_SIGHTING_MIN_AGE_TICKS = 10
+
 
 def register_tools(mcp):
     """Register all MCP tools on the provided FastMCP instance."""
@@ -175,6 +178,8 @@ def register_tools(mcp):
         Returns a 'Mission Options Menu' for all idle drones.
         The agent evaluates these options based on battery, priority, and risk,
         then executes the chosen assignments using assign_scan_zone() or return_to_base().
+        Also surfaces RE-SCAN advisories for stale sightings when mobile survivors
+        have moved 10+ ticks after last detection.
         """
         sim = shared.sim
 
@@ -281,15 +286,16 @@ def register_tools(mcp):
         stale = getattr(sim, 'stale_sightings', [])
         fresh_stale = [
             st for st in stale
-            if (sim.tick_count - st.get("stale_since_tick", 0)) >= 10
+            if (sim.tick_count - st.get("stale_since_tick", 0)) >= STALE_SIGHTING_MIN_AGE_TICKS
         ]
         if fresh_stale:
             report.append(f"\n⚠️  STALE SIGHTINGS — mobile survivors moved from last known position:")
             for st in fresh_stale:
+                age = sim.tick_count - st.get("stale_since_tick", sim.tick_count)
                 report.append(
                     f"  RE-SCAN ({st['x']},{st['y']}) — victim {st['victim_id']} last seen "
-                    f"{sim.tick_count - st['stale_since_tick']} ticks ago. "
-                    f"Use assign_scan_zone() or voice-dispatch a drone to this coordinate. "
+                    f"{age} ticks ago. "
+                    f"Identify the zone containing this cell and call assign_scan_zone() for it. "
                     f"PRIORITY: HIGH — known survivor may be nearby."
                 )
 

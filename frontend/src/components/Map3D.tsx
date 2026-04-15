@@ -199,7 +199,7 @@ export default function Map3D({ zone, drones, baseX, baseY, showRtbOnly, staleSi
 
               {/* Mobile survivor pulse ring */}
               {survivorAtPos?.is_mobile && !isVictimRescued && (
-                <mesh position={[wx, terrainHeight(survivorAtPos.x, survivorAtPos.y, zone.terrain_types[survivorAtPos.y]?.[survivorAtPos.x] ?? 'flat') + 0.3, wz]}>
+                <mesh position={[wx, h + 0.3, wz]}>
                   <torusGeometry args={[0.35, 0.04, 8, 24]} />
                   <meshStandardMaterial color="#facc15" emissive="#facc15" emissiveIntensity={1.5} transparent opacity={0.85} />
                 </mesh>
@@ -234,7 +234,7 @@ export default function Map3D({ zone, drones, baseX, baseY, showRtbOnly, staleSi
           const { wx, wz } = toWorld(st.x, st.y);
           const yPos = terrainHeight(st.x, st.y, terrain) + 0.5;
           return (
-            <group key={`stale-${st.victim_id}-${i}`}>
+            <group key={`stale-${st.victim_id}`}>
               <mesh position={[wx, yPos, wz]}>
                 <sphereGeometry args={[0.18, 8, 8]} />
                 <meshStandardMaterial color="#f97316" emissive="#f97316" emissiveIntensity={1.0} transparent opacity={0.6} />
