@@ -1,7 +1,86 @@
-venv/
+# ─── API Keys & Secrets ───────────────────────────────────────────────────────
 .env
-*.log
-*.pdf
+.env.*
+!.env.example
+
+# ─── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+.virtualenv/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.cover
+
+# Type checkers / linters
+.mypy_cache/
+.ruff_cache/
+
+# ─── Node / Frontend ──────────────────────────────────────────────────────────
+node_modules/
+frontend/node_modules/
+
+# Vite build output
+dist/
+frontend/dist/
+
+# Vite cache
+.vite/
+frontend/.vite/
+
+# npm / yarn / pnpm lockfiles generated on CI (keep package-lock.json committed)
+.yarn/
+.pnp.*
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ─── OS / Editor artifacts ────────────────────────────────────────────────────
 .DS_Store
+Thumbs.db
+desktop.ini
+
+# VSCode
+.vscode/
+!.vscode/extensions.json
+
+# JetBrains IDEs
+.idea/
+
+# ─── Project-Specific ─────────────────────────────────────────────────────────
+# AI assistant tool artifacts
+.claude/
+.playwright-mcp/
+
+# Misc scratch / temp
+*.pdf
+*.tmp
+*.bak
+
+# Git worktrees
 .worktrees/
