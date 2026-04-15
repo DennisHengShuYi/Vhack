@@ -211,6 +211,7 @@ export default function App() {
   const [activeDroneId, setActiveDroneId] = useState<string | null>(null);
   const [logFilter, setLogFilter] = useState<'all' | 'warn' | 'error' | 'victim_found' | 'ai'>('ai');
   const [showRtbOnly, setShowRtbOnly] = useState(false);
+  const [rightTab, setRightTab] = useState<'log' | 'metrics'>('log');
   const [is3DView, setIs3DView] = useState(false);
   const [victimCount, setVictimCount] = useState(10);
   const [showAssumptions, setShowAssumptions] = useState(false);
@@ -759,15 +760,18 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           )}
         </section>
 
-        {/* Metrics Panel */}
-        <MetricsPanel
-          metrics={state?.metrics ?? null}
-          elapsedTs={state?.stats?.elapsed_ts ?? 'T+00:00'}
-          staleSightings={state?.stale_sightings?.length ?? 0}
-        />
-
-        {/* Right Side: Agent Reasoning Log */}
+        {/* Right Side: Agent Reasoning Log + Metrics */}
         <section className="log-panel">
+          <div className="left-tab-bar glass">
+            <button className={`left-tab-btn ${rightTab === 'log' ? 'active' : ''}`} onClick={() => setRightTab('log')}>
+              <History size={12} /> LOG
+            </button>
+            <button className={`left-tab-btn ${rightTab === 'metrics' ? 'active' : ''}`} onClick={() => setRightTab('metrics')}>
+              <Activity size={12} /> METRICS
+            </button>
+          </div>
+
+          {rightTab === 'log' && (
           <div className="panel-section-header glass">
             <History size={14} /> SENTINEL REASONING LOG
             <div className="log-filter-group">
@@ -777,6 +781,8 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
               <button className={`log-filter-btn ${logFilter === 'victim_found' ? 'active' : ''}`} onClick={() => setLogFilter('victim_found')}>VICTIM</button>
             </div>
           </div>
+          )}
+          {rightTab === 'log' && (
           <div
             className="log-scroll glass"
             ref={logScrollRef}
@@ -822,6 +828,16 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
               <div ref={logEndRef} />
             </div>
           </div>
+          )}
+
+          {rightTab === 'metrics' && (
+          <div className="log-scroll glass" style={{ padding: '0.75rem' }}>
+            <MetricsPanel
+              metrics={state?.metrics ?? null}
+              staleSightings={state?.stale_sightings?.length ?? 0}
+            />
+          </div>
+          )}
         </section>
       </main>
 
