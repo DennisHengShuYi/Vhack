@@ -200,7 +200,9 @@ Methods removed from `agent.py`: `_extract_memory_events`, `_rule_based_assignme
 
 ## 5. Group B — Stubs (implement after Group A)
 
-### 5.1 `session_log.py` — JSONL Tick Logger
+### 5.1 `session_log.py` — JSONL Tick Logger + Cross-Mission Learning
+
+#### Write path — per-tick logging
 
 Appends one JSON line per tick to `mission_reports/YYYY-MM-DD-HH-MM.jsonl`:
 
@@ -208,13 +210,51 @@ Appends one JSON line per tick to `mission_reports/YYYY-MM-DD-HH-MM.jsonl`:
 {
   "tick": 42,
   "coverage_pct": 38.0,
-  "drones": {"ALPHA-1": {"battery": 62, "zone": "Z4"}},
+  "drones": {
+    "ALPHA-1": {"battery": 62, "zone": "Z4", "status": "scanning", "cells_moved": 18}
+  },
   "events": ["Survivor at (3,7) — P1-CRITICAL"],
-  "decision": {"type": "LLM", "assignments": [["ALPHA-1", "Z4"]], "tokens": 340}
+  "decision": {"type": "LLM", "assignments": [["ALPHA-1", "Z4"]], "tokens": 340},
+  "contract_alerts": ["⚠ CONTRACT: Coverage pace too slow"],
+  "errors": ["zone already IN_PROGRESS: Z2"]
 }
 ```
 
-Agent calls `/export-mission` endpoint on `MISSION COMPLETE`. New `POST /export-mission` endpoint added to `backend/server.py`.
+Agent calls `/export-mission` endpoint on `MISSION COMPLETE`. A new `POST /export-mission` endpoint in `backend/server.py` writes the final summary JSON alongside the JSONL file.
+
+#### Read path — cross-mission learning
+
+At mission start, `session_log.py` reads the last 5 JSONL files from `mission_reports/` and computes aggregate insights. These are injected as a `=== HISTORICAL INTEL ===` block into the system prompt, giving the agent genuine cross-mission learning without any model fine-tuning.
+
+**What is learned and how it is used:**
+
+| Pattern extracted | How it helps the next mission |
+|---|---|
+| Avg actual battery drain per zone | Calibrate RTB timing — if drones consistently drain 31% per zone, assign conservatively |
+| Drone idle latency (ticks between idle and assignment) | Self-awareness metric — if ALPHA-3 averages 4 ticks idle, agent prioritises assigning it faster |
+| Zone split efficiency (split vs single-drone completion time) | Calibrate split threshold — if splits only save 15% time, raise Score threshold above 1.5 |
+| LLM vs fallback decision quality (completion time per decision type) | Tune `_is_trivial()` — if LLM adds no benefit on 2-drone ticks, expand trivial detection |
+| Contract violation frequency (which contracts fire most, at which tick) | Adjust early-mission strategy — if coverage pace fires every mission at tick ~45, spread drones earlier |
+| Drone utilisation breakdown (% scanning / transiting / charging / idle per drone) | Identify systematic idle drones — if ALPHA-5 is idle 30% of ticks across missions, assignment strategy has a gap |
+| Error frequency (zone conflicts, LLM no-action fallbacks) | Surface recurring failure modes — if "zone IN_PROGRESS" errors appear in 4/5 missions, zone conflict gate in `hooks.py` should be prioritised |
+| Terrain-type detection rate (city/forest/flat survivors found ratio) | Pre-calibrate zone scores before Bayesian updates kick in |
+
+**Constraint respected:** No victim locations or victim counts are read from logs. All patterns are aggregated across ticks and missions — the agent learns *how it operates*, not *where victims hide*.
+
+**Example injected block at mission start:**
+
+```
+=== HISTORICAL INTEL (last 5 missions) ===
+• Battery: avg drain 31% per zone — assign drones with >56% battery to avoid mid-zone RTB
+• Zone splits: Score > 2.1 completed 40% faster when split (current threshold 1.5 — consider raising)
+• LLM value: 3+ drone ticks resolved 18% faster with LLM; 1-2 drone ticks: no measurable difference
+• Idle latency: ALPHA-3 averages 3.8 ticks idle before assignment — watch for idle contract
+• Contracts: coverage pace fired in 4/5 missions at tick ~45 — spread drones across all rows at mission start
+• Errors: "zone IN_PROGRESS" appeared in 3/5 missions — zone conflict pre-check recommended
+=== END HISTORICAL INTEL ===
+```
+
+`load_insights(n=5) -> str` is the public method called by `agent.py` at mission start, returning the formatted block or an empty string if no prior missions exist.
 
 ### 5.2 `hooks.py` — Pre/PostToolUse Layer
 
@@ -233,8 +273,8 @@ Thin wrapper around `session.call_tool()`:
 2. Create `agent/memory.py` — MissionMemory (no dependencies)
 3. Create `agent/contracts.py` — ContractChecker (depends on `aiohttp`)
 4. Refactor `agent/agent.py` — wire modules, add parallel execution, remove extracted methods
-5. Create `agent/session_log.py` stub + `agent/hooks.py` stub
-6. Add `POST /export-mission` stub to `backend/server.py`
+5. Create `agent/session_log.py` (write path + `load_insights()`) + `agent/hooks.py` stub
+6. Add `POST /export-mission` endpoint to `backend/server.py`
 
 ---
 
@@ -246,7 +286,7 @@ Thin wrapper around `session.call_tool()`:
 | `agent/memory.py` | New: MissionMemory class |
 | `agent/contracts.py` | New: ContractChecker class |
 | `agent/fallback.py` | New: WeightedPlanner class |
-| `agent/session_log.py` | New stub (Group B) |
+| `agent/session_log.py` | New (Group B): JSONL write path + `load_insights()` read path |
 | `agent/hooks.py` | New stub (Group B) |
 | `backend/server.py` | Add `POST /export-mission` stub (Group B) |
 
