@@ -99,10 +99,30 @@ async def run_simulation_loop():
                         drone.status_label = "RTB — COMPLETE"
                 sim.mission_active = False
                 sim.mission_end_time = time.time()
+                try:
+                    try:
+                        from backend.mission_flusher import flush_mission
+                        from backend.supabase_client import get_client
+                    except ModuleNotFoundError:
+                        from mission_flusher import flush_mission
+                        from supabase_client import get_client
+                    _sb = get_client()
+                    threading.Thread(
+                        target=flush_mission, args=(sim, _sb), daemon=True
+                    ).start()
+                except EnvironmentError:
+                    print("[FLUSH] Supabase env vars not set — skipping flush.", file=sys.stderr)
 
             # Heartbeat check — brings drones online in staggered order
             sim.tick_count += 1
             sim.simulate_heartbeats()
+
+            if sim.mission_active and sim.tick_count % 5 == 0:
+                recent_events = [
+                    e["text"] for e in sim.mission_log[-10:]
+                    if e.get("level") in ("VICTIM_FOUND", "SUCCESS", "WARN")
+                ]
+                sim.append_replay_snapshot(events=recent_events)
 
             # Survivor mobility: move mobile survivors every 5 ticks
             if sim.tick_count % 5 == 0:
@@ -161,6 +181,7 @@ async def run_simulation_loop():
                             )
                             if not other_scanning and zid in sim.zone.zones:
                                 sim.zone.zones[zid].status = ZoneStatus.COMPLETE
+                                sim.zone.zones[zid].completed_tick = sim.tick_count
                                 sim.log(f"✅ Zone {zid} search complete.", "SUCCESS", d_id)
 
                         # RESIDUAL HANDOFF: if this drone was reserved to cover a residual zone, go there now
@@ -304,6 +325,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+try:
+    from backend.history import router as history_router
+except ModuleNotFoundError:
+    from history import router as history_router
+app.include_router(history_router)
+
 
 @app.get("/state")
 async def get_state():
@@ -330,6 +357,19 @@ async def stop_mission():
     sim.mission_active = False
     sim.mission_end_time = time.time()
     sim.log("🛑 MISSION HALTED by operator command.", "WARN")
+    try:
+        try:
+            from backend.mission_flusher import flush_mission
+            from backend.supabase_client import get_client
+        except ModuleNotFoundError:
+            from mission_flusher import flush_mission
+            from supabase_client import get_client
+        _sb = get_client()
+        threading.Thread(
+            target=flush_mission, args=(sim, _sb), daemon=True
+        ).start()
+    except EnvironmentError:
+        print("[FLUSH] Supabase env vars not set — skipping flush.", file=sys.stderr)
     return {"status": "Mission stopped"}
 
 
