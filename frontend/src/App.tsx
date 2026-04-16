@@ -62,9 +62,9 @@ function StructuredLogText({ text }: { text: string }) {
         }
         // DECISION line
         if (t.startsWith('DECISION →') || t.startsWith('DECISION →')) {
-          const zoneMatch = t.match(/→\s*(\w+)\s*[:\-]/);
+          const zoneMatch = t.match(/→\s*(\w+)\s*[:-]/);
           const zone = zoneMatch ? zoneMatch[1] : '';
-          const rest = t.replace(/^DECISION\s*→\s*\w+\s*[:\-]?\s*/, '');
+          const rest = t.replace(/^DECISION\s*→\s*\w+\s*[:-]?\s*/, '');
           return (
             <div key={i} className="slog-row">
               <span className="slog-badge decision">DECISION</span>
@@ -224,7 +224,7 @@ export default function App() {
   const [showHistory, setShowHistory] = useState(false);
   const [historyView, setHistoryView] = useState<'list' | 'detail' | 'replay'>('list');
   const [selectedMissionId, setSelectedMissionId] = useState<string | null>(null);
-  const [selectedMissionIndex, setSelectedMissionIndex] = useState(0);
+  const [selectedMissionIndex, _setSelectedMissionIndex] = useState(0);
   const celebrationFiredRef = useRef(false);
   const celebrationCanvasRef = useRef<HTMLCanvasElement>(null);
   const prevMissionActiveRef = useRef(false);
@@ -236,7 +236,7 @@ export default function App() {
   const logScrollRef = useRef<HTMLDivElement>(null);
   const [userScrolledUp, setUserScrolledUp] = useState(false);
   const recognitionRef = useRef<any>(null);
-  const autoRescuedRef = useRef<Set<string>>(new Set());
+  const _autoRescuedRef = useRef<Set<string>>(new Set());
 
   // Victim popup handling + auto-switch to VICTIMS tab on detection
   useEffect(() => {
@@ -389,7 +389,7 @@ export default function App() {
     setTimeout(() => setIsDeploying(false), 2000);
   };
 
-  const [isTalking, setIsTalking] = useState<boolean | null>(null);
+  const [_isTalking, setIsTalking] = useState<boolean | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [transcription, setTranscription] = useState("");
   const [speechError, setSpeechError] = useState<string | null>(null);
@@ -439,7 +439,7 @@ export default function App() {
         };
 
         recognition.start();
-      } catch (_err) {
+      } catch {
         setSpeechError("Failed to initialize speech recognition.");
         setIsRecording(false);
       }
@@ -471,7 +471,7 @@ export default function App() {
     setTranscription("");
   };
 
-  const guideVictim = async (droneId: string) => {
+  const _guideVictim = async (droneId: string) => {
     await fetch(`${API_BASE}/guide-victim?drone_id=${droneId}`, { method: 'POST' });
     setIsTalking(null);
   };

@@ -1,4 +1,4 @@
-import { Activity, AlertTriangle } from 'lucide-react';
+import { Activity } from 'lucide-react';
 
 type DroneMetrics = {
   drone_id: string;

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from 'react';
+import { useState, useEffect, useRef, useMemo, type ReactNode } from 'react';
 import { fetchReplay, type ReplayTick } from '../api';
 
 const SPEED_INTERVALS: Record<string, number> = { '×1': 700, '×2': 350, '×4': 175 };
@@ -77,7 +77,7 @@ export default function MissionReplay({ missionId, onBack }: Props) {
   const GRID_W = terrain[0]?.length ?? 10;
 
   // Scanned cells: use snapshot if available, else reconstruct from drone history
-  const scanned = useCallback((): boolean[][] => {
+  const scannedGrid = useMemo((): boolean[][] => {
     const snap = ticks[index]?.scanned;
     if (snap) return snap;
     // fallback: mark cells visited by any drone up to current index
@@ -90,7 +90,7 @@ export default function MissionReplay({ missionId, onBack }: Props) {
       }
     }
     return grid;
-  }, [ticks, index]);
+  }, [ticks, index, GRID_H, GRID_W]);
 
   const currentTick = ticks[index];
   const droneEntries = Object.entries(currentTick?.drones ?? {});
@@ -120,7 +120,6 @@ export default function MissionReplay({ missionId, onBack }: Props) {
     </div>
   );
 
-  const scannedGrid = scanned();
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#080e1a' }}>
