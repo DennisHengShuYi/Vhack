@@ -236,7 +236,6 @@ export default function App() {
   const logScrollRef = useRef<HTMLDivElement>(null);
   const [userScrolledUp, setUserScrolledUp] = useState(false);
   const recognitionRef = useRef<any>(null);
-  const _autoRescuedRef = useRef<Set<string>>(new Set());
 
   // Victim popup handling + auto-switch to VICTIMS tab on detection
   useEffect(() => {
@@ -471,10 +470,7 @@ export default function App() {
     setTranscription("");
   };
 
-  const _guideVictim = async (droneId: string) => {
-    await fetch(`${API_BASE}/guide-victim?drone_id=${droneId}`, { method: 'POST' });
-    setIsTalking(null);
-  };
+
 
 
   if (isLoading) return <div className="loading-container"><Zap className="animate-pulse" /> INITIALIZING RESCUE SWARM...</div>;
