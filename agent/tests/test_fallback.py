@@ -8,28 +8,26 @@ from agent.fallback import WeightedPlanner
 # Z3 plain:   (1.0×3.0) + (1/10×2.0)       = 3.20
 # Z7 PARTIAL: (0.9×3.0) + (1/4×2.0)  + 0.5 = 3.70  ← beats Z3
 
-POLL_ONE_DRONE = """[DRONE: ALPHA-1] @ (2,1) | Battery: 80%
-  Opt 1: assign_scan_zone("ALPHA-1", "Z0") | Score: 2.5 | Transit: 3 cells | Terrain: City:12 | [GAP-ROW]
-  Opt 2: assign_scan_zone("ALPHA-1", "Z5") | Score: 1.2 | Transit: 8 cells | Terrain: Flat:10"""
+POLL_ONE_DRONE = """[DRONE: ALPHA-1] Battery: 80.0% @ (2,1)
+  Opt 1: assign_scan_zone("ALPHA-1", "Z0") - Score=2.50, Transit=3, Cost=18.0, Risk=LOW, Terrain=[City:12], Scanned=0% [GAP-ROW: no drone in this sector]
+  Opt 2: assign_scan_zone("ALPHA-1", "Z5") - Score=1.20, Transit=8, Cost=23.0, Risk=LOW, Terrain=[Flat:10], Scanned=0%"""
 
-POLL_TWO_DRONES = """[DRONE: ALPHA-1] @ (2,1) | Battery: 80%
-  Opt 1: assign_scan_zone("ALPHA-1", "Z0") | Score: 2.5 | Transit: 3 cells | Terrain: City:12
-  Opt 2: assign_scan_zone("ALPHA-1", "Z1") | Score: 1.8 | Transit: 6 cells | Terrain: City:5
+POLL_TWO_DRONES = """[DRONE: ALPHA-1] Battery: 80.0% @ (2,1)
+  Opt 1: assign_scan_zone("ALPHA-1", "Z0") - Score=2.50, Transit=3, Cost=18.0, Risk=LOW, Terrain=[City:12], Scanned=0%
+  Opt 2: assign_scan_zone("ALPHA-1", "Z1") - Score=1.80, Transit=6, Cost=21.0, Risk=LOW, Terrain=[City:5], Scanned=0%
 
-[DRONE: ALPHA-2] @ (8,1) | Battery: 75%
-  Opt 1: assign_scan_zone("ALPHA-2", "Z0") | Score: 2.5 | Transit: 5 cells | Terrain: City:12
-  Opt 2: assign_scan_zone("ALPHA-2", "Z1") | Score: 1.8 | Transit: 2 cells | Terrain: City:5"""
+[DRONE: ALPHA-2] Battery: 75.0% @ (8,1)
+  Opt 1: assign_scan_zone("ALPHA-2", "Z0") - Score=2.50, Transit=5, Cost=20.0, Risk=LOW, Terrain=[City:12], Scanned=0%
+  Opt 2: assign_scan_zone("ALPHA-2", "Z1") - Score=1.80, Transit=2, Cost=17.0, Risk=LOW, Terrain=[City:5], Scanned=0%"""
 
-POLL_RTB = """[DRONE: ALPHA-3] @ (4,7) | Battery: 22%
-  return_to_base() | Battery too low for any zone"""
+POLL_RTB = """[DRONE: ALPHA-3] Battery: 22.0% @ (4,7)
+  * REC: return_to_base() | Battery too low for any zone."""
 
-POLL_NO_ZONES = """NO_ZONES_AVAILABLE — all zones IN_PROGRESS or COMPLETE
-Idle drones [ALPHA-2, ALPHA-4]: return_to_base()
-Zones still being scanned: Z0→ALPHA-1, Z2→ALPHA-3"""
+POLL_NO_ZONES = """NO_ZONES_AVAILABLE: Zones still being scanned: Z0→ALPHA-1, Z2→ALPHA-3. Idle drones [ALPHA-2, ALPHA-4] — send them return_to_base() to conserve battery and re-assign when zones free up."""
 
-POLL_PARTIAL = """[DRONE: ALPHA-1] @ (2,1) | Battery: 80%
-  Opt 1: assign_scan_zone("ALPHA-1", "Z3") | Score: 1.0 | Transit: 10 cells | Terrain: Flat:15
-  Opt 2: assign_scan_zone("ALPHA-1", "Z7") | Score: 0.9 | Transit: 4 cells | Terrain: Flat:12 | [PARTIAL-resume]"""
+POLL_PARTIAL = """[DRONE: ALPHA-1] Battery: 80.0% @ (2,1)
+  Opt 1: assign_scan_zone("ALPHA-1", "Z3") - Score=1.00, Transit=10, Cost=25.0, Risk=LOW, Terrain=[Flat:15], Scanned=0%
+  Opt 2: assign_scan_zone("ALPHA-1", "Z7") - Score=0.90, Transit=4, Cost=19.0, Risk=LOW, Terrain=[Flat:12], Scanned=20% [PARTIAL-resume]"""
 
 
 def test_single_drone_assigned():

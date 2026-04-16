@@ -28,8 +28,6 @@ import sys
 import shared
 from simulation import ZoneStatus, chebyshev, BATTERY_RETURN_RESERVE
 
-# Stale sighting advisory: only surface to agent after this many ticks without re-scan
-STALE_SIGHTING_MIN_AGE_TICKS = 10
 
 
 def register_tools(mcp):
@@ -178,8 +176,6 @@ def register_tools(mcp):
         Returns a 'Mission Options Menu' for all idle drones.
         The agent evaluates these options based on battery, priority, and risk,
         then executes the chosen assignments using assign_scan_zone() or return_to_base().
-        Also surfaces RE-SCAN advisories for stale sightings when mobile survivors
-        have moved 10+ ticks after last detection.
         """
         sim = shared.sim
 
@@ -281,23 +277,6 @@ def register_tools(mcp):
             f"Mission Status: {complete_zones}/{total_zones} zones done, "
             f"{coverage_pct}% grid covered, {s_found}/{len(sim.zone.survivors)} survivors found"
         )
-
-        # ── Stale sightings: high-priority re-scan options ────────────────
-        stale = getattr(sim, 'stale_sightings', [])
-        fresh_stale = [
-            st for st in stale
-            if (sim.tick_count - st.get("stale_since_tick", 0)) >= STALE_SIGHTING_MIN_AGE_TICKS
-        ]
-        if fresh_stale:
-            report.append(f"\n⚠️  STALE SIGHTINGS — mobile survivors moved from last known position:")
-            for st in fresh_stale:
-                age = sim.tick_count - st.get("stale_since_tick", sim.tick_count)
-                report.append(
-                    f"  RE-SCAN ({st['x']},{st['y']}) — victim {st['victim_id']} last seen "
-                    f"{age} ticks ago. "
-                    f"Identify the zone containing this cell and call assign_scan_zone() for it. "
-                    f"PRIORITY: HIGH — known survivor may be nearby."
-                )
 
         # Determine which zone rows already have an active drone (to guide spread)
         # Grid has 3 rows of zones (row 0: y=0-4, row 1: y=5-9, row 2: y=10-14)
@@ -479,9 +458,9 @@ def register_tools(mcp):
                 status = "FOUND — AWAITING RESCUE ⚠️"
             else:
                 status = "NOT YET FOUND"
-            can_move = " [CAN MOVE — guide eligible]" if s.get("can_move") and not s["rescued"] else ""
+            mobile = " [MOBILE — guide eligible]" if s.get("is_mobile") and not s["rescued"] else ""
             lines.append(
-                f"  {s['id']} @ ({s['x']},{s['y']}) | {s['triage_priority']} | {status}{can_move}"
+                f"  {s['id']} @ ({s['x']},{s['y']}) | {s['triage_priority']} | {status}{mobile}"
             )
 
         p1 = [s for s in survivors if s["triage_priority"] == "P1-CRITICAL" and s["found"] and not s["rescued"]]

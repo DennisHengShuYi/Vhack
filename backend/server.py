@@ -108,7 +108,7 @@ async def run_simulation_loop():
                         from supabase_client import get_client
                     _sb = get_client()
                     threading.Thread(
-                        target=flush_mission, args=(sim, _sb), daemon=True
+                        target=flush_mission, args=(sim, _sb), daemon=False
                     ).start()
                 except EnvironmentError:
                     print("[FLUSH] Supabase env vars not set — skipping flush.", file=sys.stderr)
@@ -117,7 +117,7 @@ async def run_simulation_loop():
             sim.tick_count += 1
             sim.simulate_heartbeats()
 
-            if sim.mission_active and sim.tick_count % 5 == 0:
+            if sim.mission_active:
                 recent_events = [
                     e["text"] for e in sim.mission_log[-10:]
                     if e.get("level") in ("VICTIM_FOUND", "SUCCESS", "WARN")
@@ -325,10 +325,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-try:
-    from backend.history import router as history_router
-except ModuleNotFoundError:
-    from history import router as history_router
+
+from history import router as history_router
 app.include_router(history_router)
 
 

@@ -1,9 +1,9 @@
-import { useState, useEffect, CSSProperties } from 'react';
+import { useState, useEffect, type CSSProperties } from 'react';
 import {
   LineChart, Line, AreaChart, Area,
   PieChart, Pie, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend
 } from 'recharts';
-import { fetchMissionDetail, fetchReplay, formatDuration, formatDate, MissionDetail, ReplayTick } from '../api';
+import { fetchMissionDetail, fetchReplay, formatDuration, formatDate, type MissionDetail, type ReplayTick } from '../api';
 
 interface Props {
   missionId: string;

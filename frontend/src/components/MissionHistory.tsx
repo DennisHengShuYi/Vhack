@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { fetchMissions, formatDuration, formatDate, MissionSummary } from '../api';
+import { fetchMissions, formatDuration, formatDate, type MissionSummary } from '../api';
 
 interface Props {
   onViewDetail: (id: string) => void;

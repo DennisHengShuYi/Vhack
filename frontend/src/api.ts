@@ -34,10 +34,16 @@ export interface MissionDetail extends MissionSummary {
 export interface ReplayTick {
   tick: number;
   coverage_pct: number;
-  drones: Record<string, { x: number; y: number; battery: number; status: string }>;
+  drones: Record<string, {
+    x: number; y: number; battery: number; status: string;
+    status_label?: string; returning_to_base?: boolean;
+  }>;
   zones: Record<string, string>;
   events: string[];
   decision_type: string;
+  victims?: Array<{ x: number; y: number; found: boolean; rescued: boolean; is_mobile: boolean }>;
+  scanned?: boolean[][];
+  terrain?: string[][];
 }
 
 export async function fetchMissions(): Promise<MissionSummary[]> {

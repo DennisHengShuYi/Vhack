@@ -21,13 +21,6 @@ type Survivor = {
   is_mobile?: boolean;
 };
 
-type StaleSighting = {
-  x: number;
-  y: number;
-  victim_id: string;
-  stale_since_tick: number;
-};
-
 type Zone = {
   scanned_cells: boolean[][];
   hazard_cells: boolean[][];
@@ -41,7 +34,6 @@ type Props = {
   baseX: number;
   baseY: number;
   showRtbOnly: boolean;
-  staleSightings?: StaleSighting[];
 };
 
 const GRID_W = 20;
@@ -81,7 +73,7 @@ function isReturning(drone: Drone) {
   );
 }
 
-export default function Map3D({ zone, drones, baseX, baseY, showRtbOnly, staleSightings = [] }: Props) {
+export default function Map3D({ zone, drones, baseX, baseY, showRtbOnly }: Props) {
   const visibleDrones = showRtbOnly ? drones.filter(isReturning) : drones;
 
   return (
@@ -193,15 +185,10 @@ export default function Map3D({ zone, drones, baseX, baseY, showRtbOnly, staleSi
               {survivorAtPos && !isVictimRescued && (
                 <mesh position={[wx, h + 0.32, wz]} castShadow>
                   <sphereGeometry args={[0.12, 16, 16]} />
-                  <meshStandardMaterial color="#ff3d3d" emissive="#800000" emissiveIntensity={0.8} />
-                </mesh>
-              )}
-
-              {/* Mobile survivor pulse ring */}
-              {survivorAtPos?.is_mobile && !isVictimRescued && (
-                <mesh position={[wx, h + 0.3, wz]}>
-                  <torusGeometry args={[0.35, 0.04, 8, 24]} />
-                  <meshStandardMaterial color="#facc15" emissive="#facc15" emissiveIntensity={1.5} transparent opacity={0.85} />
+                  {survivorAtPos.is_mobile && !survivorAtPos.found
+                    ? <meshStandardMaterial color="#00f3ff" emissive="#007a80" emissiveIntensity={1.2} />
+                    : <meshStandardMaterial color="#ff3d3d" emissive="#800000" emissiveIntensity={0.8} />
+                  }
                 </mesh>
               )}
 
@@ -224,30 +211,6 @@ export default function Map3D({ zone, drones, baseX, baseY, showRtbOnly, staleSi
                   </mesh>
                 </group>
               )}
-            </group>
-          );
-        })}
-
-        {/* Stale sighting markers */}
-        {staleSightings.map((st, i) => {
-          const terrain = zone.terrain_types[st.y]?.[st.x] ?? 'flat';
-          const { wx, wz } = toWorld(st.x, st.y);
-          const yPos = terrainHeight(st.x, st.y, terrain) + 0.5;
-          return (
-            <group key={`stale-${st.victim_id}`}>
-              <mesh position={[wx, yPos, wz]}>
-                <sphereGeometry args={[0.18, 8, 8]} />
-                <meshStandardMaterial color="#f97316" emissive="#f97316" emissiveIntensity={1.0} transparent opacity={0.6} />
-              </mesh>
-              <Text
-                position={[wx, yPos + 0.28, wz]}
-                fontSize={0.22}
-                color="#f97316"
-                anchorX="center"
-                anchorY="middle"
-              >
-                ?
-              </Text>
             </group>
           );
         })}

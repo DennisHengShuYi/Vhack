@@ -22,11 +22,11 @@ from mcp.client.stdio import stdio_client
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.prebuilt import create_react_agent
 from dotenv import load_dotenv
-
-from agent.memory import MissionMemory
-from agent.contracts import ContractChecker
-from agent.fallback import WeightedPlanner
-from agent.session_log import SessionLog
+from memory import MissionMemory  
+from contracts import ContractChecker  
+from fallback import WeightedPlanner  
+from session_log import SessionLog  
+from hooks import ToolHooks  
 
 load_dotenv()
 
@@ -151,6 +151,7 @@ class AgentOrchestrator:
         self.memory = MissionMemory()
         self.contracts = ContractChecker()
         self.planner = WeightedPlanner()
+        self.hooks = ToolHooks(self.memory)
         self.session_log = SessionLog()
         self._historical_intel: str = ""  # loaded on mission start, injected once
 
@@ -202,17 +203,41 @@ class AgentOrchestrator:
         session: ClientSession,
         http_session: aiohttp.ClientSession,
         actions: list[tuple],
+        state: dict | None = None,
+        tick: int = 0,
     ) -> None:
-        """Execute all drone assignments in parallel via asyncio.gather."""
+        """Execute all drone assignments in parallel via asyncio.gather.
+
+        Pre-hooks validate each assignment before the MCP call (battery gate,
+        zone conflict gate). Post-hooks update MissionMemory immediately after.
+        """
+        _state = state or {}
+
         async def _call(action):
             try:
                 if action[0] == "assign":
+                    drone_id, zone_id = action[1], action[2]
+                    # Pre-assign hook — may convert assignment to RTB
+                    validated = self.hooks.pre_assign(drone_id, zone_id, _state)
+                    if validated is None:
+                        # Hook blocked the assignment — RTB instead
+                        result = await session.call_tool(
+                            "return_to_base", {"drone_id": drone_id}
+                        )
+                        msg = result.content[0].text if result.content else "done"
+                        await self._broadcast_log(http_session, f"[HOOK-RTB] {msg}")
+                        return
                     result = await session.call_tool(
                         "assign_scan_zone",
-                        {"drone_id": action[1], "zone_id": action[2]}
+                        {"drone_id": drone_id, "zone_id": zone_id}
                     )
                     msg = result.content[0].text if result.content else "done"
                     await self._broadcast_log(http_session, f"[SMART-FALLBACK] {msg}")
+                    # Post-assign hook — update memory tier 1 immediately
+                    self.hooks.post_assign(drone_id, zone_id, msg, tick)
+                    # Post-detect hook — if result mentions survivor, log tier 0
+                    if "survivor" in msg.lower() and ("found" in msg.lower() or "detected" in msg.lower()):
+                        self.hooks.post_detect(drone_id, msg, tick)
                 elif action[0] == "return":
                     result = await session.call_tool(
                         "return_to_base", {"drone_id": action[1]}
@@ -294,15 +319,16 @@ class AgentOrchestrator:
                             continue
 
                         print(f"\n--- SENTINEL Tick {tick} ---", file=sys.stderr)
+                        _state_for_contracts: dict = {}
 
                         # ── ALL ZONES ACTIVE — idle drones RTB and wait ─────
                         if "NO_ZONES_AVAILABLE" in poll_text:
                             actions = self.planner.assign(poll_text)
-                            await self._parallel_execute(session, http_session, actions)
+                            await self._parallel_execute(session, http_session, actions, _state_for_contracts, tick)
                             await asyncio.sleep(2.0)
                             continue
 
-                        # ── MISSION COMPLETE: recall swarm, stop loop ────────
+                        # ── MISSION COMPLETE: recall swarm, idle until next mission ──
                         if "MISSION COMPLETE" in poll_text:
                             if not mission_complete_logged:
                                 mission_complete_logged = True
@@ -310,10 +336,16 @@ class AgentOrchestrator:
                                     "🏁 MISSION COMPLETE — All survivors found. Recalling swarm to base.")
                                 await self._recall_all_drones(session, http_session)
                                 self.session_log.close()
-                            break
+                                # Give the flush daemon thread time to write to Supabase
+                                await asyncio.sleep(5.0)
+                                await self._broadcast_log(http_session,
+                                    "⏳ SENTINEL standing by — awaiting next mission.")
+                            await asyncio.sleep(2.0)
+                            continue
 
                         # Reset memory and contracts on mission start
                         if "MISSION START" in poll_text:
+                            mission_complete_logged = False
                             self.memory.reset()
                             self.contracts.reset()
                             self.session_log.start()
@@ -323,7 +355,6 @@ class AgentOrchestrator:
                                     "📚 HISTORICAL INTEL loaded from prior missions.")
 
                         # ── PHASE 1.5: CONTRACT CHECK — fetch state, inject alerts ──
-                        _state_for_contracts: dict = {}
                         try:
                             _resp = await http_session.get(f"{self.backend_url}/state")
                             _state_for_contracts = await _resp.json()
@@ -402,24 +433,24 @@ class AgentOrchestrator:
                                     await self._broadcast_log(http_session,
                                         "⚡ LLM reasoned without acting — auto-assigning via rule-based fallback.")
                                     actions = self.planner.assign(poll_text)
-                                    await self._parallel_execute(session, http_session, actions)
+                                    await self._parallel_execute(session, http_session, actions, _state_for_contracts, tick)
 
                             except asyncio.TimeoutError:
                                 await self._broadcast_log(http_session, "⏱️ LLM timeout — rule-based fallback.")
                                 actions = self.planner.assign(poll_text)
-                                await self._parallel_execute(session, http_session, actions)
+                                await self._parallel_execute(session, http_session, actions, _state_for_contracts, tick)
                             except Exception as e:
                                 print(f"  [ERROR] {e}", file=sys.stderr)
                                 await self._broadcast_log(http_session, f"[ERROR] {e}")
                                 actions = self.planner.assign(poll_text)
-                                await self._parallel_execute(session, http_session, actions)
+                                await self._parallel_execute(session, http_session, actions, _state_for_contracts, tick)
                         else:
                             # Weighted fallback — no LLM, or trivial tick
                             if is_trivial and self.llm_active:
                                 await self._broadcast_log(http_session,
                                     "[AUTO] No tradeoff — single valid option per drone, rule-based assignment used")
                             actions = self.planner.assign(poll_text)
-                            await self._parallel_execute(session, http_session, actions)
+                            await self._parallel_execute(session, http_session, actions, _state_for_contracts, tick)
 
                         print("-" * 30, file=sys.stderr)
                         await asyncio.sleep(0.5)

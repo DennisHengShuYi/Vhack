@@ -8,10 +8,7 @@ GET /missions/{id}/replay   Tick array for replay
 """
 import sys
 from fastapi import APIRouter, HTTPException
-try:
-    from backend.supabase_client import get_client
-except ModuleNotFoundError:
-    from supabase_client import get_client
+from supabase_client import get_client
 
 router = APIRouter(prefix="/missions", tags=["history"])
 

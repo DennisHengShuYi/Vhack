@@ -15,7 +15,7 @@ class WeightedPlanner:
     _DRONE_RE = re.compile(r'\[DRONE:\s*(\S+)\]')
     _OPT_RE = re.compile(
         r'Opt\s+\d+:\s*assign_scan_zone\(\"([^\"]+)\",\s*\"([^\"]+)\"\)'
-        r'.*?Score:\s*([\d.]+).*?Transit:\s*(\d+)'
+        r'.*?Score[=:]\s*([\d.]+).*?Transit[=:]\s*(\d+)'
     )
     _RTB_RE = re.compile(r'return_to_base\(\).*?Battery too low', re.IGNORECASE)
     _IDLE_RE = re.compile(r'Idle drones \[([^\]]+)\]')
@@ -61,7 +61,7 @@ class WeightedPlanner:
                     "zone": m.group(2),
                     "score": float(m.group(3)),
                     "transit": int(m.group(4)),
-                    "gap_row": "[GAP-ROW]" in line,
+                    "gap_row": "[GAP-ROW" in line,
                     "partial": "[PARTIAL-resume]" in line,
                     "rtb": False,
                 })

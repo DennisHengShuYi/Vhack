@@ -491,7 +491,7 @@ class SimulationState:
 
     def append_replay_snapshot(self, events: List[str]) -> None:
         """Store a tick snapshot for replay. Called every 5th tick from server.py."""
-        self._replay_buffer.append({
+        snap: Dict[str, Any] = {
             "tick": self.tick_count,
             "coverage_pct": round(self.metrics.coverage_percent, 1),
             "drones": {
@@ -500,6 +500,8 @@ class SimulationState:
                     "y": d.y,
                     "battery": round(d.battery, 1),
                     "status": d.status,
+                    "status_label": getattr(d, "status_label", d.status),
+                    "returning_to_base": getattr(d, "returning_to_base", False),
                 }
                 for d_id, d in self.drones.items()
                 if d.is_active
@@ -509,7 +511,28 @@ class SimulationState:
                 for z_id, z in self.zone.zones.items()
             },
             "events": events,
-        })
+            "victims": [
+                {
+                    "x": s["x"],
+                    "y": s["y"],
+                    "found": s.get("found", False),
+                    "rescued": s.get("rescued", False),
+                    "is_mobile": s.get("is_mobile", False),
+                }
+                for s in self.zone.survivors
+            ],
+            "scanned": [
+                [bool(self.zone.scanned_cells[y][x]) for x in range(self.zone.width)]
+                for y in range(self.zone.height)
+            ],
+        }
+        # Include static terrain only in the first snapshot to save space
+        if not self._replay_buffer:
+            snap["terrain"] = [
+                [self.zone.terrain_types[y][x] for x in range(self.zone.width)]
+                for y in range(self.zone.height)
+            ]
+        self._replay_buffer.append(snap)
 
     def get_available_zones(self) -> List[Dict[str, Any]]:
         available = []

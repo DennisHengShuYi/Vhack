@@ -27,11 +27,10 @@ type Metrics = {
 
 type Props = {
   metrics: Metrics | null;
-  staleSightings?: number;
 };
 
 
-export default function MetricsPanel({ metrics, staleSightings }: Props) {
+export default function MetricsPanel({ metrics }: Props) {
   if (!metrics) return <div style={{ color: '#6b7280', fontSize: 13, padding: 12 }}>No metrics yet — start a mission.</div>;
 
   const totalDetections = metrics.true_positives + metrics.false_positives;
@@ -41,18 +40,6 @@ export default function MetricsPanel({ metrics, staleSightings }: Props) {
 
   return (
     <div className="metrics-panel" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-
-      {/* Stale sighting alert */}
-      {staleSightings !== undefined && staleSightings > 0 && (
-        <div className="metric-card" style={{ borderColor: '#f97316', background: 'rgba(249,115,22,0.1)' }}>
-          <div className="metric-label" style={{ color: '#f97316' }}>
-            <AlertTriangle size={12} /> Stale Sightings
-          </div>
-          <div className="metric-value" style={{ fontSize: 14, color: '#f97316' }}>
-            {staleSightings} mobile survivor{staleSightings > 1 ? 's' : ''} moved from last known position
-          </div>
-        </div>
-      )}
 
       {/* Thermal detection accuracy */}
       <div className="metric-card">
