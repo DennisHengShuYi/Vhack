@@ -10,9 +10,6 @@ jobs:
   backend:
     name: Backend Tests
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
 
     steps:
       - uses: actions/checkout@v4
@@ -25,10 +22,10 @@ jobs:
           cache-dependency-path: backend/requirements.txt
 
       - name: Install dependencies
-        run: pip install -r requirements.txt pytest
+        run: pip install -r backend/requirements.txt pytest
 
       - name: Run tests
-        run: pytest tests/ -v
+        run: pytest backend/tests/ -v
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -37,9 +34,6 @@ jobs:
   agent:
     name: Agent Tests
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: agent
 
     steps:
       - uses: actions/checkout@v4
@@ -52,10 +46,10 @@ jobs:
           cache-dependency-path: agent/requirements.txt
 
       - name: Install dependencies
-        run: pip install -r requirements.txt pytest
+        run: pip install -r agent/requirements.txt pytest
 
       - name: Run tests
-        run: pytest tests/ -v
+        run: pytest agent/tests/ -v
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
