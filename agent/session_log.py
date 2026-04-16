@@ -6,12 +6,15 @@ Read path:  load_insights() reads last N JSONL files and returns a
             HISTORICAL INTEL prompt block injected at mission start.
 """
 import json
+import os
 import re
+import requests
 from datetime import datetime
 from pathlib import Path
 
 REPORTS_DIR = Path(__file__).parent.parent / "mission_reports"
 MAX_MISSIONS = 5
+API_BASE = os.environ.get("BACKEND_URL", "http://127.0.0.1:8000")
 
 
 class SessionLog:
@@ -69,10 +72,11 @@ class SessionLog:
     def load_insights(self, n: int = MAX_MISSIONS) -> str:
         """
         Read last N JSONL files and return a HISTORICAL INTEL prompt block.
-        Returns empty string if no prior missions exist.
+        Falls back to GET /missions/insights when no local files exist (cloud deploy).
         """
-        if not REPORTS_DIR.exists():
-            return ""
+        if not REPORTS_DIR.exists() or not list(REPORTS_DIR.glob("*.jsonl")):
+            return self._load_insights_from_api()
+
         files = sorted(REPORTS_DIR.glob("*.jsonl"))[-n:]
         missions = []
         for f in files:
@@ -86,7 +90,7 @@ class SessionLog:
             if ticks:
                 missions.append(ticks)
         if not missions:
-            return ""
+            return self._load_insights_from_api()
         insights = self._compute_insights(missions)
         if not insights:
             return ""
@@ -94,6 +98,16 @@ class SessionLog:
         lines.extend(f"• {i}" for i in insights)
         lines.append("=== END HISTORICAL INTEL ===")
         return "\n".join(lines)
+
+    def _load_insights_from_api(self) -> str:
+        """Call backend GET /missions/insights when no local JSONL files exist."""
+        try:
+            resp = requests.get(f"{API_BASE}/missions/insights", timeout=3)
+            if resp.status_code == 200:
+                return resp.json().get("insights", "")
+        except Exception:
+            pass
+        return ""
 
     def _compute_insights(self, missions: list[list[dict]]) -> list[str]:
         insights: list[str] = []
