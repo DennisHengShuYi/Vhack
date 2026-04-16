@@ -131,6 +131,7 @@ class Zone(BaseModel):
     status: ZoneStatus = ZoneStatus.UNSCANNED
     assigned_to: Optional[str] = None
     residual_path: List[List[int]] = []
+    completed_tick: Optional[int] = None
 
 def chebyshev(x1: int, y1: int, x2: int, y2: int) -> int:
     return max(abs(x2 - x1), abs(y2 - y1))
@@ -328,11 +329,6 @@ class DisasterZone(BaseModel):
 
             for i, (sx, sy) in enumerate(seen_in_pool[:num]):
                 _cond = random.choice(CONDITION_POOL)
-                _can_move = (
-                    True if _cond == "MOBILE_HEALTHY"
-                    else random.choice([True, False]) if _cond == "MINOR_INJURY"
-                    else False
-                )
                 self.survivors.append({
                     "x": sx, "y": sy,
                     "report": random.choice(reports),
@@ -342,12 +338,8 @@ class DisasterZone(BaseModel):
                     "heat_intensity": random.randint(80, 98),
                     "condition": _cond,
                     "triage_priority": CONDITION_TRIAGE[_cond],
-                    "can_move": _can_move,
                     "notified_rescue": False,
-                    # ── Mobility fields ────────────────────────────────
                     "is_mobile": _cond in ("MOBILE_HEALTHY", "MINOR_INJURY"),
-                    "last_seen_tick": None,
-                    "position_history": [],
                 })
 
 
@@ -384,6 +376,7 @@ class SimulationState:
         self.total_rescued = 0
         self._log_id = 0
         self.tick_count: int = 0                   # Incremented every sim tick
+        self._replay_buffer: List[dict] = []
         self.streaming_text: str = ""              # Live LLM token buffer for real-time frontend display
         self.reserved_zones: Dict[str, str] = {}  # zone_id → drone_id that will cover residual
         self.probability_map: List[List[float]] = self._init_probability_map()
@@ -398,7 +391,6 @@ class SimulationState:
         # Initialise per-drone slots for all drones that exist at spawn
         for d_id in self.drones:
             self.metrics.init_drone(d_id)
-        self.stale_sightings: List[Dict[str, Any]] = []
 
     def _sample_unique_points(self, count: int) -> List[tuple]:
         cells = [(x, y) for y in range(GRID_H) for x in range(GRID_W)]
@@ -496,6 +488,28 @@ class SimulationState:
         if drone.is_charging:
             return False
         return drone.battery <= self.minimum_battery_to_return(drone)
+
+    def append_replay_snapshot(self, events: List[str]) -> None:
+        """Store a tick snapshot for replay. Called every 5th tick from server.py."""
+        self._replay_buffer.append({
+            "tick": self.tick_count,
+            "coverage_pct": round(self.metrics.coverage_percent, 1),
+            "drones": {
+                d_id: {
+                    "x": d.x,
+                    "y": d.y,
+                    "battery": round(d.battery, 1),
+                    "status": d.status,
+                }
+                for d_id, d in self.drones.items()
+                if d.is_active
+            },
+            "zones": {
+                z_id: z.status.value
+                for z_id, z in self.zone.zones.items()
+            },
+            "events": events,
+        })
 
     def get_available_zones(self) -> List[Dict[str, Any]]:
         available = []
@@ -823,10 +837,10 @@ class SimulationState:
 
     def simulate_survivor_movement(self) -> None:
         """
-        Called every 5 ticks. Mobile survivors (MOBILE_HEALTHY, MINOR_INJURY) that
-        have not been rescued have a 30% chance to drift to an adjacent non-hazard cell.
-        If the survivor was previously spotted (last_seen_tick is set), the old position
-        is added to stale_sightings.
+        Called every 5 ticks. Unfound mobile survivors (MOBILE_HEALTHY, MINOR_INJURY)
+        have a 60% chance to drift to an adjacent non-hazard, unscanned cell.
+        Only unfound survivors move — once found they are stationary.
+        Survivors only move into unscanned cells so drones can still detect them.
         """
         if not self.mission_active:
             return
@@ -834,47 +848,32 @@ class SimulationState:
         dirs = [(-1,-1),(0,-1),(1,-1),(1,0),(1,1),(0,1),(-1,1),(-1,0)]
 
         for s in self.zone.survivors:
-            if not s.get("is_mobile") or s["rescued"]:
+            if not s.get("is_mobile") or s.get("found") or s["rescued"]:
                 continue
 
-            if random.random() > 0.30:
-                continue  # 70% chance: stays put this tick
+            if random.random() > 0.60:
+                continue  # 40% chance: stays put this tick
 
             old_x, old_y = s["x"], s["y"]
 
-            # Find valid adjacent non-hazard cells
+            # Only move to adjacent non-hazard, unscanned cells
             candidates = [
                 (old_x + dx, old_y + dy)
                 for dx, dy in dirs
                 if (0 <= old_x + dx < self.zone.width
                     and 0 <= old_y + dy < self.zone.height
-                    and not self.zone.hazard_cells[old_y + dy][old_x + dx])
+                    and not self.zone.hazard_cells[old_y + dy][old_x + dx]
+                    and not self.zone.scanned_cells[old_y + dy][old_x + dx])
             ]
             if not candidates:
                 continue
 
             new_x, new_y = random.choice(candidates)
             s["x"], s["y"] = new_x, new_y
-            s["position_history"].append({"x": old_x, "y": old_y, "tick": self.tick_count})
-
-            # If the survivor was previously spotted, record a stale sighting
-            if s.get("last_seen_tick") is not None and s.get("found") and not s["rescued"]:
-                # Remove any previous stale sighting for this victim
-                self.stale_sightings = [
-                    st for st in self.stale_sightings
-                    if st["victim_id"] != s["id"]
-                ]
-                self.stale_sightings.append({
-                    "x": old_x,
-                    "y": old_y,
-                    "victim_id": s["id"],
-                    "stale_since_tick": self.tick_count,
-                })
-                self.log(
-                    f"📍 MOBILE SURVIVOR {s['id']}: moved from ({old_x},{old_y}) → ({new_x},{new_y}). "
-                    f"Stale sighting recorded at ({old_x},{old_y}).",
-                    "INFO"
-                )
+            self.log(
+                f"🚶 MOBILE SURVIVOR {s['id']} drifted ({old_x},{old_y}) → ({new_x},{new_y})",
+                "INFO"
+            )
 
     def _ts(self) -> str:
         mt = self.mission_start_time
@@ -940,7 +939,7 @@ class SimulationState:
             "heat_intensity": random.randint(85, 95),
             "condition": "TRAPPED_STABLE",
             "triage_priority": CONDITION_TRIAGE.get(triage, triage),
-            "can_move": False,
+            "is_mobile": False,
             "notified_rescue": False,
         })
         self.log(f"NEW TARGET INTEL: Victim reported near ({x},{y}) - '{report}'", "INTEL")
@@ -1016,6 +1015,8 @@ class SimulationState:
             )
             if survivor and not survivor["found"]:
                 survivor["found"] = True
+                survivor["found_tick"] = self.tick_count
+                survivor["found_by_drone"] = drone_id
                 drone.is_waiting_response = True
                 drone.victim_report = survivor["report"]
                 drone.status = "IDLE"
@@ -1023,7 +1024,6 @@ class SimulationState:
                 self.total_victims_found += 1
                 self.metrics.victims_found += 1
                 self.metrics.true_positives += 1
-                survivor["last_seen_tick"] = self.tick_count
                 self.boost_adjacent_zones(x, y)  # NEW: dynamic priority update
                 self.update_probability_after_scan(x, y, True)
                 drone.last_thermal_scan = {
@@ -1041,8 +1041,6 @@ class SimulationState:
                     f"CNN Confidence: {confidence}% | Triage: {survivor['triage_priority']} | "
                     f"Report: [{survivor['report']}] - DRONE ON STANDBY."
                 )
-                if survivor.get("can_move"):
-                    msg += " [SURVIVOR ABLE TO MOVE - CAN BE GUIDED TO BASE]"
                 self.log(msg, "VICTIM_FOUND", drone_id)
                 return msg
             elif survivor and survivor["found"] and not survivor["rescued"]:
@@ -1072,11 +1070,6 @@ class SimulationState:
                 s["rescued"] = True
                 self.total_rescued += 1
                 self.metrics.victims_rescued += 1
-                # Clear any stale sighting for this rescued victim
-                self.stale_sightings = [
-                    st for st in self.stale_sightings
-                    if st["victim_id"] != s["id"]
-                ]
                 drone.is_waiting_response = False
                 drone.victim_report = None
                 drone.status = "IDLE"
@@ -1092,7 +1085,7 @@ class SimulationState:
         if not drone: return "Drone not found"
         for s in self.zone.survivors:
             if s["x"] == drone.x and s["y"] == drone.y and s["found"] and not s["rescued"]:
-                if s.get("can_move"):
+                if s.get("is_mobile"):
                     drone.is_guiding = True
                     drone.guiding_victim_id = s["id"]
                     drone.target_x, drone.target_y = drone.base_x, drone.base_y
@@ -1238,5 +1231,4 @@ class SimulationState:
                 "grid_h": GRID_H,
             },
             "metrics": self.metrics.to_dict(),
-            "stale_sightings": self.stale_sightings,
         }
