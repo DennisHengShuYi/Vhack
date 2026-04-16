@@ -24,6 +24,7 @@ import time
 import threading
 from contextlib import asynccontextmanager
 from typing import Optional, Any
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -98,10 +99,34 @@ async def run_simulation_loop():
                         drone.status_label = "RTB — COMPLETE"
                 sim.mission_active = False
                 sim.mission_end_time = time.time()
+                try:
+                    try:
+                        from backend.mission_flusher import flush_mission
+                        from backend.supabase_client import get_client
+                    except ModuleNotFoundError:
+                        from mission_flusher import flush_mission
+                        from supabase_client import get_client
+                    _sb = get_client()
+                    threading.Thread(
+                        target=flush_mission, args=(sim, _sb), daemon=False
+                    ).start()
+                except EnvironmentError:
+                    print("[FLUSH] Supabase env vars not set — skipping flush.", file=sys.stderr)
 
             # Heartbeat check — brings drones online in staggered order
             sim.tick_count += 1
             sim.simulate_heartbeats()
+
+            if sim.mission_active:
+                recent_events = [
+                    e["text"] for e in sim.mission_log[-10:]
+                    if e.get("level") in ("VICTIM_FOUND", "SUCCESS", "WARN")
+                ]
+                sim.append_replay_snapshot(events=recent_events)
+
+            # Survivor mobility: move mobile survivors every 5 ticks
+            if sim.tick_count % 5 == 0:
+                sim.simulate_survivor_movement()
 
             # Loop A: advance each drone one step
             if sim.mission_active:
@@ -119,27 +144,45 @@ async def run_simulation_loop():
                         drone.status_label = "VICTIM STANDBY"
                         continue
 
-                    # Auto-charge at base
+                    # Auto-charge at base (adaptive — charge only to minimum needed)
                     if (drone.x, drone.y) == (base_x, base_y) and drone.battery < 100 and (
                         drone.returning_to_base or drone.is_charging or drone.battery < LOW_BATTERY_THRESHOLD
                     ):
+                        charge_target = sim.smart_charge_target(d_id)
                         if not drone.is_charging:
-                            sim.log(f"🤖 {d_id} arrived at base. Commencing recharge.", "INFO", d_id)
+                            sim.log(f"🤖 {d_id} arrived at base. Charging to {charge_target:.0f}%.", "INFO", d_id)
                         sim.charge_step(d_id)
-                        if not drone.is_charging:
-                            # Charging just completed — clear RTB flag and wait for agent assignment
+                        # Stop charging early if we've reached the smart target
+                        if drone.battery >= charge_target and drone.is_charging:
+                            drone.is_charging = False
+                            drone.charge_cycles += 1
+                            drone.status = "IDLE"
+                            drone.status_label = "READY"
+                            drone.target_x = None
+                            drone.target_y = None
                             drone.returning_to_base = False
-                        continue  # Always skip movement logic while at base charging/post-charge
+                            drone.voice_override = False
+                            sim.log(f"[BATTERY] {d_id} smart-charged to {drone.battery:.0f}%. Ready.", "CHARGE", d_id)
+                        if not drone.is_charging:
+                            drone.returning_to_base = False
+                        continue
 
                     # No target and empty path — zone complete; check pending residual then go idle
                     if drone.target_x is None and not drone.path_queue:
                         # Zone completion bookkeeping
                         if drone.assigned_zone_id:
                             zid = drone.assigned_zone_id
-                            if zid in sim.zone.zones:
-                                sim.zone.zones[zid].status = ZoneStatus.COMPLETE
-                                sim.log(f"✅ Zone {zid} search complete.", "SUCCESS", d_id)
                             drone.assigned_zone_id = None
+                            # Only mark COMPLETE if no other drone is still scanning this zone
+                            other_scanning = any(
+                                d.assigned_zone_id == zid
+                                for did2, d in sim.drones.items()
+                                if did2 != d_id
+                            )
+                            if not other_scanning and zid in sim.zone.zones:
+                                sim.zone.zones[zid].status = ZoneStatus.COMPLETE
+                                sim.zone.zones[zid].completed_tick = sim.tick_count
+                                sim.log(f"✅ Zone {zid} search complete.", "SUCCESS", d_id)
 
                         # RESIDUAL HANDOFF: if this drone was reserved to cover a residual zone, go there now
                         if drone.pending_zone_id and not drone.returning_to_base:
@@ -283,6 +326,10 @@ app.add_middleware(
 )
 
 
+from history import router as history_router
+app.include_router(history_router)
+
+
 @app.get("/state")
 async def get_state():
     """Return full simulation state: drones, zone, log, stats."""
@@ -308,6 +355,19 @@ async def stop_mission():
     sim.mission_active = False
     sim.mission_end_time = time.time()
     sim.log("🛑 MISSION HALTED by operator command.", "WARN")
+    try:
+        try:
+            from backend.mission_flusher import flush_mission
+            from backend.supabase_client import get_client
+        except ModuleNotFoundError:
+            from mission_flusher import flush_mission
+            from supabase_client import get_client
+        _sb = get_client()
+        threading.Thread(
+            target=flush_mission, args=(sim, _sb), daemon=True
+        ).start()
+    except EnvironmentError:
+        print("[FLUSH] Supabase env vars not set — skipping flush.", file=sys.stderr)
     return {"status": "Mission stopped"}
 
 
@@ -717,6 +777,19 @@ async def _background_voice_command(message: str):
 
     except Exception as e:
         sim.log(f"❌ VOICE COMMAND ERROR: {type(e).__name__}: {e}", "AI")
+
+
+@app.get("/export-mission")
+async def export_mission():
+    """Return path and size of latest mission JSONL report."""
+    reports_dir = Path(__file__).parent.parent / "mission_reports"
+    if not reports_dir.exists():
+        return {"status": "no_reports", "path": None}
+    files = sorted(reports_dir.glob("*.jsonl"))
+    if not files:
+        return {"status": "no_reports", "path": None}
+    latest = files[-1]
+    return {"status": "ok", "path": str(latest), "size_bytes": latest.stat().st_size}
 
 
 # ─── MCP Tools ────────────────────────────────────────────────────────────────

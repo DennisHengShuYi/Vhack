@@ -22,6 +22,11 @@ from mcp.client.stdio import stdio_client
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.prebuilt import create_react_agent
 from dotenv import load_dotenv
+from memory import MissionMemory  
+from contracts import ContractChecker  
+from fallback import WeightedPlanner  
+from session_log import SessionLog  
+from hooks import ToolHooks  
 
 load_dotenv()
 
@@ -35,7 +40,7 @@ Disaster grid: 20×15. Twelve search sectors (4 columns × 3 rows, each 5×5 cel
   ROW 1 (y 5–9):   Z4 (W),  Z5 (C), Z6 (CE), Z7 (E)
   ROW 2 (y 10–14): Z8 (SW), Z9 (S), Z10 (SE), Z11 (SE2)
 
-Zone priorities are computed dynamically from terrain — HIGH means many city cells detected.
+Zone scores are computed from terrain weights and updated in real-time as cells are scanned — higher score means more expected survivors remaining in the zone.
 
 === TERRAIN TYPES ===
 - CITY cells: Dense population — highest survivor probability. Zones with City terrain are HIGH priority.
@@ -58,6 +63,21 @@ If "Battery too low" → write DECISION → RTB: battery insufficient, then call
 After all analysis blocks, write one mission-level note:
   MISSION PULSE: [1 sentence on coverage pace or any zone needing urgent attention]
 
+=== FULL COVERAGE MANDATE ===
+You do NOT know how many survivors exist. The mission is complete ONLY when every zone is COMPLETE (all accessible cells scanned). Never assume the mission is done early. Every zone must be fully searched.
+
+=== DYNAMIC PRIORITY ===
+Zone scores update during the mission:
+- When a survivor is found, all unscanned cells in adjacent zones get a ×1.5 probability boost — their Score increases automatically in the next options menu.
+- As cells are scanned, their probability drops to 0 — zone Scores decrease naturally as coverage increases.
+- Always check current Scores in the options menu — they change throughout the mission.
+
+=== PROBABILITY-GUIDED DECISIONS ===
+Use get_probability_map() to see all zone scores at once. Score reflects terrain weights and Bayesian updates from scan results — higher score means more likely to contain undiscovered survivors. Options in get_idle_drones() are already sorted by score, so Opt 1 is always the best choice unless zone uniqueness forces otherwise.
+
+=== ZONE SPLITTING ===
+When 2+ idle drones are available and a zone has Score > 1.5, consider using split_scan_zone(drone_a, drone_b, zone_id) to scan it in parallel. This halves scan time on high-value zones. Only split zones with Score > 1.5 — low-score zones are not worth the coordination cost.
+
 === CRITICAL — ZONE UNIQUENESS ===
 Within a single planning block, EVERY drone MUST have a DIFFERENT DECISION zone.
 - Scan all DECISION → lines you have written — no two can share the same zone_id.
@@ -67,9 +87,9 @@ Within a single planning block, EVERY drone MUST have a DIFFERENT DECISION zone.
 === STRATEGIC RULES ===
 - Never leave an idle drone without an assignment.
 - Never assign a zone already listed as IN_PROGRESS — another drone is scanning it.
-- OPTIONS ARE SORTED BY PRIORITY FIRST: Opt 1 is always the highest-priority (city terrain) zone. ALWAYS prefer Opt 1 unless it conflicts with ZONE UNIQUENESS.
-- HIGH-priority zones (City terrain) MUST be assigned before MEDIUM or LOW-priority zones regardless of transit cost, unless the transit difference exceeds 12 cells.
-- [GAP-ROW] tag means no drone currently covers that row — within the same priority tier, prefer the gap-row zone for better spatial coverage. Never skip a HIGH-priority zone to fill a LOW-priority gap row.
+- OPTIONS ARE SORTED BY SCORE FIRST: Opt 1 always has the highest expected survivor score. ALWAYS prefer Opt 1 unless it conflicts with ZONE UNIQUENESS.
+- High-score zones (Score > 1.5) MUST be assigned before low-score zones regardless of transit cost, unless the transit difference exceeds 12 cells.
+- [GAP-ROW] tag means no drone currently covers that row — when two zones have scores within 0.3 of each other, prefer the gap-row zone for better spatial coverage. Never skip a high-score zone to fill a gap row.
 - SPATIAL SPREAD: In any planning batch, no two drones should be assigned to adjacent zones. Prefer zones in different rows (Row 0: Z0-Z3, Row 1: Z4-Z7, Row 2: Z8-Z11).
 - Prefer [PARTIAL-resume] zones — they have saved scan progress and will complete faster.
 - All 5 drones are equal — ALPHA-5 is assigned the next best available zone exactly like ALPHA-1–4. No special assist role.
@@ -81,8 +101,8 @@ Write your Mission Log clearly so the human observer can follow your logic, then
 When you see "MISSION START — STRATEGIC BRIEFING REQUIRED":
 1. Review the terrain analysis already logged (shows zone priorities from city/forest/lake counts).
 2. Write a concise Mission Plan BEFORE calling any tools:
-   - Identify ALL HIGH-priority (city terrain) zones first — these are your primary targets.
-   - Assign drones to HIGH-priority zones first, then MEDIUM, then LOW.
+   - Review zone Scores — zones with Score > 1.5 are your primary targets (dense city/forest terrain).
+   - Assign drones to highest-Score zones first.
    - Spread drones across the grid — do not cluster all drones in the same row or corner.
    - Try to send at least one drone to each grid row (Row 0: Z0-Z3, Row 1: Z4-Z7, Row 2: Z8-Z11) at mission start for coverage breadth.
 3. Then execute all assignments in one pass.
@@ -128,7 +148,12 @@ class AgentOrchestrator:
     def __init__(self, server_script_path: str):
         self.server_script_path = server_script_path
         self.backend_url = "http://127.0.0.1:8000"
-        self.mission_memory: list[str] = []  # Rolling log of key mission events
+        self.memory = MissionMemory()
+        self.contracts = ContractChecker()
+        self.planner = WeightedPlanner()
+        self.hooks = ToolHooks(self.memory)
+        self.session_log = SessionLog()
+        self._historical_intel: str = ""  # loaded on mission start, injected once
 
         openai_key = os.getenv("OPENAI_API_KEY")
         gemini_key = os.getenv("GEMINI_API_KEY")
@@ -173,78 +198,56 @@ class AgentOrchestrator:
         except Exception:
             pass
 
-    def _rule_based_assignments(self, poll_text: str) -> list[tuple[str, str, Optional[str]]]:
+    async def _parallel_execute(
+        self,
+        session: ClientSession,
+        http_session: aiohttp.ClientSession,
+        actions: list[tuple],
+        state: dict | None = None,
+        tick: int = 0,
+    ) -> None:
+        """Execute all drone assignments in parallel via asyncio.gather.
+
+        Pre-hooks validate each assignment before the MCP call (battery gate,
+        zone conflict gate). Post-hooks update MissionMemory immediately after.
         """
-        Fallback: parse the options menu and greedily assign each drone to its
-        highest-scored valid option (Opt 1), or return_to_base if none available.
-        Ensures no two drones are assigned the same zone.
-        Any drone that has options but all zones are already taken by earlier drones
-        in the same batch gets RTB — prevents drones getting stuck idle indefinitely.
-        """
-        import re
-        actions = []
-        assigned_zones: set[str] = set()
+        _state = state or {}
 
-        # For NO_ZONES_AVAILABLE, only RTB the idle drones listed in [...] brackets.
-        # The message also names actively-scanning drones in "Zones still being scanned: ZX→ALPHA-N"
-        # — a bare re.findall over the whole string would match those too and abort their scans.
-        if "NO_ZONES_AVAILABLE" in poll_text:
-            idle_match = re.search(r"Idle drones \[([^\]]+)\]", poll_text)
-            if idle_match:
-                for drone_id in re.findall(r"ALPHA-\d+", idle_match.group(1)):
-                    if drone_id not in assigned_zones:
-                        actions.append(("return", drone_id, None))
-                        assigned_zones.add(drone_id)
-            return actions
+        async def _call(action):
+            try:
+                if action[0] == "assign":
+                    drone_id, zone_id = action[1], action[2]
+                    # Pre-assign hook — may convert assignment to RTB
+                    validated = self.hooks.pre_assign(drone_id, zone_id, _state)
+                    if validated is None:
+                        # Hook blocked the assignment — RTB instead
+                        result = await session.call_tool(
+                            "return_to_base", {"drone_id": drone_id}
+                        )
+                        msg = result.content[0].text if result.content else "done"
+                        await self._broadcast_log(http_session, f"[HOOK-RTB] {msg}")
+                        return
+                    result = await session.call_tool(
+                        "assign_scan_zone",
+                        {"drone_id": drone_id, "zone_id": zone_id}
+                    )
+                    msg = result.content[0].text if result.content else "done"
+                    await self._broadcast_log(http_session, f"[SMART-FALLBACK] {msg}")
+                    # Post-assign hook — update memory tier 1 immediately
+                    self.hooks.post_assign(drone_id, zone_id, msg, tick)
+                    # Post-detect hook — if result mentions survivor, log tier 0
+                    if "survivor" in msg.lower() and ("found" in msg.lower() or "detected" in msg.lower()):
+                        self.hooks.post_detect(drone_id, msg, tick)
+                elif action[0] == "return":
+                    result = await session.call_tool(
+                        "return_to_base", {"drone_id": action[1]}
+                    )
+                    msg = result.content[0].text if result.content else "done"
+                    await self._broadcast_log(http_session, f"[RTB] {msg}")
+            except Exception as e:
+                print(f"  [PARALLEL ERROR] {e}", file=sys.stderr)
 
-        # Track which drones were seen and whether each got an action.
-        # Drones that exhaust all their options (all zones taken by earlier drones)
-        # are sent to RTB rather than left idle with no assignment.
-        drone_got_action: dict[str, bool] = {}
-        current_drone = None
-
-        for line in poll_text.splitlines():
-            line = line.strip()
-            if line.startswith("[DRONE:"):
-                current_drone = line.split("DRONE:")[1].split("]")[0].strip()
-                drone_got_action[current_drone] = False
-            elif current_drone:
-                if "return_to_base()" in line and "Battery too low" in line:
-                    actions.append(("return", current_drone, None))
-                    drone_got_action[current_drone] = True
-                    current_drone = None
-                elif line.startswith("Opt") and "assign_scan_zone" in line:
-                    parts = line.split('"')
-                    if len(parts) >= 4:
-                        zone_id = parts[3]
-                        if zone_id not in assigned_zones:
-                            actions.append(("assign", current_drone, zone_id))
-                            assigned_zones.add(zone_id)
-                            drone_got_action[current_drone] = True
-                            current_drone = None
-                        # else: zone taken by earlier drone — keep parsing next Opt line
-
-        # Any drone that was parsed but never got an action (all its zone options were
-        # already claimed by earlier drones in this batch) → send to RTB.
-        for drone_id, got_action in drone_got_action.items():
-            if not got_action:
-                actions.append(("return", drone_id, None))
-
-        return actions
-
-    def _extract_memory_events(self, messages: list, tick: int) -> list[str]:
-        """Parses tool results after each tick and extracts key mission events."""
-        events = []
-        for m in messages:
-            if m.type == "tool":
-                content = str(m.content)
-                if "survivor" in content.lower() and ("found" in content.lower() or "detected" in content.lower()):
-                    events.append(f"Tick {tick}: Survivor detected — {content[:80]}")
-                if "complete" in content.lower() and "zone" in content.lower():
-                    events.append(f"Tick {tick}: Zone completed — {content[:60]}")
-                if "low battery" in content.lower() or "rtb" in content.lower():
-                    events.append(f"Tick {tick}: Battery RTB triggered — {content[:60]}")
-        return events
+        await asyncio.gather(*[_call(a) for a in actions])
 
     def _is_trivial(self, poll_text: str) -> bool:
         """Returns True if every idle drone has exactly 1 valid option or must RTB — no tradeoff."""
@@ -316,40 +319,81 @@ class AgentOrchestrator:
                             continue
 
                         print(f"\n--- SENTINEL Tick {tick} ---", file=sys.stderr)
+                        _state_for_contracts: dict = {}
 
                         # ── ALL ZONES ACTIVE — idle drones RTB and wait ─────
                         if "NO_ZONES_AVAILABLE" in poll_text:
-                            await self._execute_rule_based(session, poll_text)
+                            actions = self.planner.assign(poll_text)
+                            await self._parallel_execute(session, http_session, actions, _state_for_contracts, tick)
                             await asyncio.sleep(2.0)
                             continue
 
-                        # ── MISSION COMPLETE: recall swarm, stop loop ────────
+                        # ── MISSION COMPLETE: recall swarm, idle until next mission ──
                         if "MISSION COMPLETE" in poll_text:
                             if not mission_complete_logged:
                                 mission_complete_logged = True
                                 await self._broadcast_log(http_session,
                                     "🏁 MISSION COMPLETE — All survivors found. Recalling swarm to base.")
                                 await self._recall_all_drones(session, http_session)
-                            break
+                                self.session_log.close()
+                                # Give the flush daemon thread time to write to Supabase
+                                await asyncio.sleep(5.0)
+                                await self._broadcast_log(http_session,
+                                    "⏳ SENTINEL standing by — awaiting next mission.")
+                            await asyncio.sleep(2.0)
+                            continue
 
-                        # Reset memory on mission start
+                        # Reset memory and contracts on mission start
                         if "MISSION START" in poll_text:
-                            self.mission_memory = []
+                            mission_complete_logged = False
+                            self.memory.reset()
+                            self.contracts.reset()
+                            self.session_log.start()
+                            self._historical_intel = self.session_log.load_insights()
+                            if self._historical_intel:
+                                await self._broadcast_log(http_session,
+                                    "📚 HISTORICAL INTEL loaded from prior missions.")
+
+                        # ── PHASE 1.5: CONTRACT CHECK — fetch state, inject alerts ──
+                        try:
+                            _resp = await http_session.get(f"{self.backend_url}/state")
+                            _state_for_contracts = await _resp.json()
+                            alerts = self.contracts.check(_state_for_contracts, tick)
+                            if alerts:
+                                poll_text += "\n\n" + "\n".join(alerts)
+                        except Exception as e:
+                            print(f"[CONTRACT] State fetch failed: {e}", file=sys.stderr)
+
+                        # Log tick state to JSONL
+                        try:
+                            self.session_log.log_tick(
+                                tick=tick,
+                                state=_state_for_contracts,
+                                events=list(self.memory.tier0[-3:]),
+                                decision_type="pending",
+                                assignments=[],
+                                contract_alerts=alerts if 'alerts' in dir() else [],
+                            )
+                        except Exception:
+                            pass
 
                         # ── PHASE 2: EXECUTE (LLM or rule-based) ────────────
                         is_trivial = self._is_trivial(poll_text)
 
                         if self.llm_active and agent_executor is not None and not is_trivial:
                             # Build memory block for injection
-                            memory_block = ""
-                            if self.mission_memory:
-                                memory_block = "\n\n=== MISSION MEMORY (recent key events) ===\n"
-                                memory_block += "\n".join(f"  • {e}" for e in self.mission_memory[-8:])
-                                memory_block += "\n=== END MEMORY ===\n"
+                            memory_block = self.memory.to_prompt_block()
+                            if memory_block:
+                                memory_block = "\n\n" + memory_block + "\n"
+
+                            historical_block = ""
+                            if self._historical_intel:
+                                historical_block = "\n\n" + self._historical_intel + "\n"
+                                self._historical_intel = ""  # inject once, then clear
 
                             messages = [
                                 SystemMessage(content=SYSTEM_PROMPT),
-                                HumanMessage(content=f"{memory_block}Execute assignments for these idle drones:\n\n{poll_text}")
+                                HumanMessage(content=f"{historical_block}{memory_block}Execute assignments for these idle drones:\n\n{poll_text}")
                             ]
                             try:
                                 async for state in agent_executor.astream(
@@ -376,8 +420,7 @@ class AgentOrchestrator:
                                             await self._broadcast_log(http_session, f"⚠️ {text}")
 
                                 # Extract and store memory events from this tick
-                                new_events = self._extract_memory_events(messages, tick)
-                                self.mission_memory.extend(new_events)
+                                self.memory.extract(messages, tick)
 
                                 # Safety net: if LLM reasoned but made no actual tool calls,
                                 # fall back to rule-based so drones never stay stuck idle.
@@ -389,39 +432,25 @@ class AgentOrchestrator:
                                     print("  [FALLBACK] LLM produced no tool calls — rule-based assignment.", file=sys.stderr)
                                     await self._broadcast_log(http_session,
                                         "⚡ LLM reasoned without acting — auto-assigning via rule-based fallback.")
-                                    await self._execute_rule_based(session, poll_text)
+                                    actions = self.planner.assign(poll_text)
+                                    await self._parallel_execute(session, http_session, actions, _state_for_contracts, tick)
 
                             except asyncio.TimeoutError:
                                 await self._broadcast_log(http_session, "⏱️ LLM timeout — rule-based fallback.")
-                                await self._execute_rule_based(session, poll_text)
+                                actions = self.planner.assign(poll_text)
+                                await self._parallel_execute(session, http_session, actions, _state_for_contracts, tick)
                             except Exception as e:
                                 print(f"  [ERROR] {e}", file=sys.stderr)
                                 await self._broadcast_log(http_session, f"[ERROR] {e}")
-                                await self._execute_rule_based(session, poll_text)
+                                actions = self.planner.assign(poll_text)
+                                await self._parallel_execute(session, http_session, actions, _state_for_contracts, tick)
                         else:
-                            # Rule-based fallback — no LLM, or trivial tick
-                            actions = self._rule_based_assignments(poll_text)
+                            # Weighted fallback — no LLM, or trivial tick
                             if is_trivial and self.llm_active:
                                 await self._broadcast_log(http_session,
                                     "[AUTO] No tradeoff — single valid option per drone, rule-based assignment used")
-                            for action in actions:
-                                try:
-                                    if action[0] == "assign":
-                                        result = await session.call_tool(
-                                            "assign_scan_zone",
-                                            {"drone_id": action[1], "zone_id": action[2]}
-                                        )
-                                        msg = result.content[0].text if result.content else "done"
-                                        await self._broadcast_log(http_session, f"[ROUTING] {msg}")
-                                    elif action[0] == "return":
-                                        result = await session.call_tool(
-                                            "return_to_base",
-                                            {"drone_id": action[1]}
-                                        )
-                                        msg = result.content[0].text if result.content else "done"
-                                        await self._broadcast_log(http_session, f"[RTB] {msg}")
-                                except Exception as e:
-                                    print(f"  [FALLBACK ERROR] {e}", file=sys.stderr)
+                            actions = self.planner.assign(poll_text)
+                            await self._parallel_execute(session, http_session, actions, _state_for_contracts, tick)
 
                         print("-" * 30, file=sys.stderr)
                         await asyncio.sleep(0.5)

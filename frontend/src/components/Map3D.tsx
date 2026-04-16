@@ -18,6 +18,7 @@ type Survivor = {
   y: number;
   found?: boolean;
   rescued?: boolean;
+  is_mobile?: boolean;
 };
 
 type Zone = {
@@ -104,9 +105,7 @@ export default function Map3D({ zone, drones, baseX, baseY, showRtbOnly }: Props
           const scanned = zone.scanned_cells[y][x];
           const hazard = zone.hazard_cells[y][x];
           const survivorAtPos = zone.survivors.find((s) => s.x === x && s.y === y);
-          const isVictimFound = !!survivorAtPos?.found;
           const isVictimRescued = !!survivorAtPos?.rescued;
-          const isVictimHidden = survivorAtPos && !isVictimFound && !isVictimRescued;
 
           const { wx, wz } = toWorld(x, y);
           const h = terrainHeight(x, y, terrain);
@@ -184,7 +183,10 @@ export default function Map3D({ zone, drones, baseX, baseY, showRtbOnly }: Props
               {survivorAtPos && !isVictimRescued && (
                 <mesh position={[wx, h + 0.32, wz]} castShadow>
                   <sphereGeometry args={[0.12, 16, 16]} />
-                  <meshStandardMaterial color="#ff3d3d" emissive="#800000" emissiveIntensity={0.8} />
+                  {survivorAtPos.is_mobile && !survivorAtPos.found
+                    ? <meshStandardMaterial color="#00f3ff" emissive="#007a80" emissiveIntensity={1.2} />
+                    : <meshStandardMaterial color="#ff3d3d" emissive="#800000" emissiveIntensity={0.8} />
+                  }
                 </mesh>
               )}
 

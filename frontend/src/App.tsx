@@ -24,6 +24,10 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import Map3D from './components/Map3D';
+import MetricsPanel from './components/MetricsPanel';
+import MissionHistory from './components/MissionHistory';
+import MissionDetailView from './components/MissionDetail';
+import MissionReplay from './components/MissionReplay';
 
 // --- Constants ---
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
@@ -58,9 +62,9 @@ function StructuredLogText({ text }: { text: string }) {
         }
         // DECISION line
         if (t.startsWith('DECISION →') || t.startsWith('DECISION →')) {
-          const zoneMatch = t.match(/→\s*(\w+)\s*[:\-]/);
+          const zoneMatch = t.match(/→\s*(\w+)\s*[:-]/);
           const zone = zoneMatch ? zoneMatch[1] : '';
-          const rest = t.replace(/^DECISION\s*→\s*\w+\s*[:\-]?\s*/, '');
+          const rest = t.replace(/^DECISION\s*→\s*\w+\s*[:-]?\s*/, '');
           return (
             <div key={i} className="slog-row">
               <span className="slog-badge decision">DECISION</span>
@@ -132,8 +136,8 @@ function LogEntry({ entry }: { entry: any }) {
 // ─── Triage CSS class helper ────────────────────────────────────────────────
 function triageCssClass(triage: string): string {
   if (triage === "P1-CRITICAL") return "p1_critical";
-  if (triage === "P2-URGENT") return "p2_urgent";
-  if (triage === "P3-STABLE") return "p3_stable";
+  if (triage === "P2-URGENT")   return "p2_urgent";
+  if (triage === "P3-STABLE")   return "p3_stable";
   return "p3_stable";
 }
 
@@ -149,8 +153,8 @@ function VictimListPanel({
 }) {
   const TRIAGE_ORDER: Record<string, number> = {
     "P1-CRITICAL": 0,
-    "P2-URGENT": 1,
-    "P3-STABLE": 2,
+    "P2-URGENT":   1,
+    "P3-STABLE":   2,
   };
 
   const sorted = [...survivors]
@@ -210,12 +214,17 @@ export default function App() {
   const [activeDroneId, setActiveDroneId] = useState<string | null>(null);
   const [logFilter, setLogFilter] = useState<'all' | 'warn' | 'error' | 'victim_found' | 'ai'>('ai');
   const [showRtbOnly, setShowRtbOnly] = useState(false);
+  const [rightTab, setRightTab] = useState<'log' | 'metrics'>('log');
   const [is3DView, setIs3DView] = useState(false);
   const [victimCount, setVictimCount] = useState(10);
   const [showAssumptions, setShowAssumptions] = useState(false);
   const [leftTab, setLeftTab] = useState<'fleet' | 'victims'>('fleet');
   const [highlightedVictim, setHighlightedVictim] = useState<{ x: number; y: number } | null>(null);
   const [missionComplete, setMissionComplete] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [historyView, setHistoryView] = useState<'list' | 'detail' | 'replay'>('list');
+  const [selectedMissionId, setSelectedMissionId] = useState<string | null>(null);
+  const [selectedMissionIndex, _setSelectedMissionIndex] = useState(0);
   const celebrationFiredRef = useRef(false);
   const celebrationCanvasRef = useRef<HTMLCanvasElement>(null);
   const prevMissionActiveRef = useRef(false);
@@ -227,7 +236,6 @@ export default function App() {
   const logScrollRef = useRef<HTMLDivElement>(null);
   const [userScrolledUp, setUserScrolledUp] = useState(false);
   const recognitionRef = useRef<any>(null);
-  const autoRescuedRef = useRef<Set<string>>(new Set());
 
   // Victim popup handling + auto-switch to VICTIMS tab on detection
   useEffect(() => {
@@ -380,7 +388,7 @@ export default function App() {
     setTimeout(() => setIsDeploying(false), 2000);
   };
 
-  const [isTalking, setIsTalking] = useState<boolean | null>(null);
+  const [_isTalking, setIsTalking] = useState<boolean | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [transcription, setTranscription] = useState("");
   const [speechError, setSpeechError] = useState<string | null>(null);
@@ -430,7 +438,7 @@ export default function App() {
         };
 
         recognition.start();
-      } catch (_err) {
+      } catch {
         setSpeechError("Failed to initialize speech recognition.");
         setIsRecording(false);
       }
@@ -462,20 +470,17 @@ export default function App() {
     setTranscription("");
   };
 
-  const guideVictim = async (droneId: string) => {
-    await fetch(`${API_BASE}/guide-victim?drone_id=${droneId}`, { method: 'POST' });
-    setIsTalking(null);
-  };
 
 
-  if (isLoading) return <div className="loading-container"><Zap className="animate-pulse" /> INITIALIZING SENTINEL...</div>;
+
+  if (isLoading) return <div className="loading-container"><Zap className="animate-pulse" /> INITIALIZING RESCUE SWARM...</div>;
 
   const { stats, drones, zone, log, base_station } = state || {};
   // Prefer live WebSocket stream; fall back to polling value if WS not yet connected
   const streaming_text = wsStreamText || state?.streaming_text || "";
   const baseX = base_station?.x ?? 0;
   const baseY = base_station?.y ?? 0;
-  const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
+const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
   const isReturningDrone = (drone: any) =>
     drone?.returning_to_base ||
     String(drone?.status_label || '').toLowerCase().includes('rtb') ||
@@ -493,8 +498,8 @@ export default function App() {
         <div className="brand">
           <Shield className="brand-logo" />
           <div className="brand-text">
-            <h1>RescueSwarm</h1>
-            <span className="subtitle">AI Drone Search & Rescue Simulation</span>
+            <h1>RESCUE SWARM</h1>
+            <span className="subtitle">First Responder Swarm Intelligence v2.0.0</span>
           </div>
         </div>
 
@@ -542,6 +547,13 @@ export default function App() {
 
           <div className="header-divider" />
 
+          <button
+            className={`cyber-button toggle-3d ${showHistory ? 'active' : ''}`}
+            onClick={() => { setShowHistory(h => !h); setHistoryView('list'); }}
+            title="Mission History"
+          >
+            <History size={14} /> HISTORY
+          </button>
           <button className={`cyber-button toggle-3d ${is3DView ? 'active' : ''}`} onClick={() => setIs3DView(p => !p)}>3D</button>
           <button className="cyber-button info-btn" onClick={() => setShowAssumptions(true)} title="Simulation Parameters"><Info size={15} /></button>
         </div>
@@ -578,56 +590,56 @@ export default function App() {
             {leftTab === 'victims' ? (
               <VictimListPanel survivors={zone?.survivors || []} highlighted={highlightedVictim} onSelect={setHighlightedVictim} />
             ) : (
-              <div className="drone-list">
-                {displayedDrones.map((drone: any) => {
-                  const isOffline = !drone.is_active;
-                  return (
-                    <motion.div
-                      key={drone.id}
-                      className={`drone-card ${activeDroneId === drone.id ? 'active' : ''} ${drone.is_waiting_response ? 'alert' : ''} ${isOffline ? 'offline' : ''}`}
-                      whileHover={{ scale: 1.02 }}
-                      onClick={() => setActiveDroneId(drone.id)}
-                    >
-                      <div className="drone-card-header">
-                        <div className="flex-row gap-2 items-center">
-                          <span className={`heartbeat-dot ${isOffline ? 'offline' : 'online'}`} title={isOffline ? 'No signal' : 'Connected'} />
-                          <span className="drone-id font-mono">{drone.id}</span>
+            <div className="drone-list">
+              {displayedDrones.map((drone: any) => {
+                const isOffline = !drone.is_active;
+                return (
+                <motion.div
+                  key={drone.id}
+                  className={`drone-card ${activeDroneId === drone.id ? 'active' : ''} ${drone.is_waiting_response ? 'alert' : ''} ${isOffline ? 'offline' : ''}`}
+                  whileHover={{ scale: 1.02 }}
+                  onClick={() => setActiveDroneId(drone.id)}
+                >
+                  <div className="drone-card-header">
+                    <div className="flex-row gap-2 items-center">
+                      <span className={`heartbeat-dot ${isOffline ? 'offline' : 'online'}`} title={isOffline ? 'No signal' : 'Connected'} />
+                      <span className="drone-id font-mono">{drone.id}</span>
+                    </div>
+                    <div className="flex-row gap-2 items-center">
+                      <span className="text-xs opacity-60">{drone.battery.toFixed(0)}%</span>
+                      <div className={`status-dot ${drone.status_label.toLowerCase().replace(/ /g, '-')}`}></div>
+                    </div>
+                  </div>
+                  {isOffline ? (
+                    <div className="drone-offline-body">
+                      <WifiOff size={18} className="offline-icon" />
+                      <span className="offline-label">AWAITING HEARTBEAT</span>
+                      <span className="offline-sublabel">Joining swarm mesh network…</span>
+                    </div>
+                  ) : (
+                  <div className="drone-card-body">
+                    <div className="drone-telemetry">
+                      <div className="tel-row">
+                        <Battery size={14} />
+                        <div className="battery-bar-container">
+                          <div className={`battery-fill ${drone.battery < LOW_BATTERY_PCT ? 'critical' : ''}`} style={{ width: `${drone.battery}%` }}></div>
                         </div>
-                        <div className="flex-row gap-2 items-center">
-                          <span className="text-xs opacity-60">{drone.battery.toFixed(0)}%</span>
-                          <div className={`status-dot ${drone.status_label.toLowerCase().replace(/ /g, '-')}`}></div>
-                        </div>
+                        <span className="font-mono text-xs">{drone.battery.toFixed(0)}%</span>
                       </div>
-                      {isOffline ? (
-                        <div className="drone-offline-body">
-                          <WifiOff size={18} className="offline-icon" />
-                          <span className="offline-label">AWAITING HEARTBEAT</span>
-                          <span className="offline-sublabel">Joining swarm mesh network…</span>
-                        </div>
-                      ) : (
-                        <div className="drone-card-body">
-                          <div className="drone-telemetry">
-                            <div className="tel-row">
-                              <Battery size={14} />
-                              <div className="battery-bar-container">
-                                <div className={`battery-fill ${drone.battery < LOW_BATTERY_PCT ? 'critical' : ''}`} style={{ width: `${drone.battery}%` }}></div>
-                              </div>
-                              <span className="font-mono text-xs">{drone.battery.toFixed(0)}%</span>
-                            </div>
-                            <div className="tel-row">
-                              <Navigation size={14} />
-                              <span className="font-mono text-xs">({drone.x}, {drone.y}) · {drone.terrain?.toUpperCase() ?? 'N/A'}</span>
-                            </div>
-                            <div className={`status-chip ${drone.status_label.toLowerCase().replace(/ /g, '-').replace(/[^a-z0-9-]/g, '')}`}>
-                              {drone.status_label}
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                    </motion.div>
-                  );
-                })}
-              </div>
+                      <div className="tel-row">
+                        <Navigation size={14} />
+                        <span className="font-mono text-xs">({drone.x}, {drone.y}) · {drone.terrain?.toUpperCase() ?? 'N/A'}</span>
+                      </div>
+                      <div className={`status-chip ${drone.status_label.toLowerCase().replace(/ /g, '-').replace(/[^a-z0-9-]/g, '')}`}>
+                        {drone.status_label}
+                      </div>
+                    </div>
+                  </div>
+                  )}
+                </motion.div>
+                );
+              })}
+            </div>
             )}
           </div>
         </section>
@@ -688,10 +700,13 @@ export default function App() {
                 if (hazard && terrain !== 'lake') cellClass += " hazard";
 
                 // Scanned applies on top of terrain — NOT mutually exclusive
+                const mobileUnfoundAtPos = !isVictimFound && !isVictimRescued && survivorAtPos?.is_mobile;
+
                 if (isScanned) cellClass += " scanned";
                 if (isBase) cellClass += " base-cell";
                 else if (survivorAtPos) {
                   if (isVictimRescued) cellClass += " rescued-cell";
+                  else if (mobileUnfoundAtPos) cellClass += " victim-mobile-cell";
                   else cellClass += " victim-cell";
                 }
                 if (highlightedVictim?.x === x && highlightedVictim?.y === y) cellClass += " victim-pinned";
@@ -700,7 +715,7 @@ export default function App() {
                   <div key={i} className={`grid-cell${cellClass}`}>
                     {isScanned && <div className="scan-tick" />}
                     {stats.mission_active && zone.survivors.find((s: any) => s.x === x && s.y === y && !s.found && !s.rescued) && (
-                      <div className="victim-dot" />
+                      <div className={mobileUnfoundAtPos ? "victim-dot mobile" : "victim-dot"} />
                     )}
                     <AnimatePresence>
                       {survivorAtPos && !isVictimRescued && (
@@ -757,8 +772,18 @@ export default function App() {
           )}
         </section>
 
-        {/* Right Side: Agent Reasoning Log */}
+        {/* Right Side: Agent Reasoning Log + Metrics */}
         <section className="log-panel">
+          <div className="left-tab-bar glass">
+            <button className={`left-tab-btn ${rightTab === 'log' ? 'active' : ''}`} onClick={() => setRightTab('log')}>
+              <History size={12} /> LOG
+            </button>
+            <button className={`left-tab-btn ${rightTab === 'metrics' ? 'active' : ''}`} onClick={() => setRightTab('metrics')}>
+              <Activity size={12} /> METRICS
+            </button>
+          </div>
+
+          {rightTab === 'log' && (
           <div className="panel-section-header glass">
             <History size={14} /> SENTINEL REASONING LOG
             <div className="log-filter-group">
@@ -768,6 +793,8 @@ export default function App() {
               <button className={`log-filter-btn ${logFilter === 'victim_found' ? 'active' : ''}`} onClick={() => setLogFilter('victim_found')}>VICTIM</button>
             </div>
           </div>
+          )}
+          {rightTab === 'log' && (
           <div
             className="log-scroll glass"
             ref={logScrollRef}
@@ -813,6 +840,15 @@ export default function App() {
               <div ref={logEndRef} />
             </div>
           </div>
+          )}
+
+          {rightTab === 'metrics' && (
+          <div className="log-scroll glass" style={{ padding: '0.75rem' }}>
+            <MetricsPanel
+              metrics={state?.metrics ?? null}
+            />
+          </div>
+          )}
         </section>
       </main>
 
@@ -1064,6 +1100,60 @@ export default function App() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* --- MISSION HISTORY OVERLAY --- */}
+      {showHistory && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(5,10,20,0.97)', zIndex: 100,
+          display: 'flex', flexDirection: 'column',
+        }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '12px 20px', borderBottom: '1px solid #1e293b', background: '#0a0f1e', flexShrink: 0
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <History size={16} style={{ color: '#7eb3ff' }} />
+              <span style={{ color: '#e0e6ff', fontWeight: 600, fontSize: '14px', letterSpacing: '1px' }}>
+                MISSION HISTORY
+              </span>
+            </div>
+            <button
+              onClick={() => setShowHistory(false)}
+              style={{ background: 'transparent', border: 'none', color: '#64748b', cursor: 'pointer', fontSize: '18px', padding: '4px 8px' }}
+            >
+              ✕
+            </button>
+          </div>
+          <div style={{ flex: 1, overflow: 'hidden' }}>
+            {historyView === 'list' && (
+              <MissionHistory
+                onViewDetail={(id) => {
+                  setSelectedMissionId(id);
+                  setHistoryView('detail');
+                }}
+                onViewReplay={(id) => {
+                  setSelectedMissionId(id);
+                  setHistoryView('replay');
+                }}
+              />
+            )}
+            {historyView === 'detail' && selectedMissionId && (
+              <MissionDetailView
+                missionId={selectedMissionId}
+                missionIndex={selectedMissionIndex}
+                onBack={() => setHistoryView('list')}
+                onReplay={() => setHistoryView('replay')}
+              />
+            )}
+            {historyView === 'replay' && selectedMissionId && (
+              <MissionReplay
+                missionId={selectedMissionId}
+                onBack={() => setHistoryView(selectedMissionId ? 'detail' : 'list')}
+              />
+            )}
+          </div>
+        </div>
+      )}
 
       {/* --- CSS - Inline specifically for the dashboard components --- */}
       <style>{`
@@ -1431,6 +1521,21 @@ export default function App() {
           border-color: rgba(255, 61, 61, 0.3) !important;
           box-shadow: inset 0 0 10px rgba(255, 61, 61, 0.1);
           animation: pulse-red 2s infinite;
+        }
+
+        .grid-cell.victim-mobile-cell {
+          background: rgba(0, 243, 255, 0.18) !important;
+          border-color: rgba(0, 243, 255, 0.5) !important;
+          box-shadow: inset 0 0 10px rgba(0, 243, 255, 0.15);
+          animation: pulse-cyan 1.5s infinite;
+        }
+        @keyframes pulse-cyan {
+          0%, 100% { box-shadow: inset 0 0 6px rgba(0,243,255,0.15), 0 0 4px rgba(0,243,255,0.3); }
+          50%       { box-shadow: inset 0 0 14px rgba(0,243,255,0.35), 0 0 8px rgba(0,243,255,0.6); }
+        }
+        .victim-dot.mobile {
+          background: #00f3ff;
+          box-shadow: 0 0 5px #00f3ff;
         }
 
         .grid-cell.rescued-cell {
