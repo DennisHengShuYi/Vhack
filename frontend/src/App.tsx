@@ -25,6 +25,9 @@ import {
 import { motion, AnimatePresence } from 'framer-motion';
 import Map3D from './components/Map3D';
 import MetricsPanel from './components/MetricsPanel';
+import MissionHistory from './components/MissionHistory';
+import MissionDetailView from './components/MissionDetail';
+import MissionReplay from './components/MissionReplay';
 
 // --- Constants ---
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
@@ -218,6 +221,10 @@ export default function App() {
   const [leftTab, setLeftTab] = useState<'fleet' | 'victims'>('fleet');
   const [highlightedVictim, setHighlightedVictim] = useState<{ x: number; y: number } | null>(null);
   const [missionComplete, setMissionComplete] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [historyView, setHistoryView] = useState<'list' | 'detail' | 'replay'>('list');
+  const [selectedMissionId, setSelectedMissionId] = useState<string | null>(null);
+  const [selectedMissionIndex, setSelectedMissionIndex] = useState(0);
   const celebrationFiredRef = useRef(false);
   const celebrationCanvasRef = useRef<HTMLCanvasElement>(null);
   const prevMissionActiveRef = useRef(false);
@@ -544,6 +551,13 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
 
           <div className="header-divider" />
 
+          <button
+            className={`cyber-button toggle-3d ${showHistory ? 'active' : ''}`}
+            onClick={() => { setShowHistory(h => !h); setHistoryView('list'); }}
+            title="Mission History"
+          >
+            <History size={14} /> HISTORY
+          </button>
           <button className={`cyber-button toggle-3d ${is3DView ? 'active' : ''}`} onClick={() => setIs3DView(p => !p)}>3D</button>
           <button className="cyber-button info-btn" onClick={() => setShowAssumptions(true)} title="Simulation Parameters"><Info size={15} /></button>
         </div>
@@ -662,7 +676,6 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
                 baseX={baseX}
                 baseY={baseY}
                 showRtbOnly={showRtbOnly}
-                staleSightings={state?.stale_sightings ?? []}
               />
             </div>
           ) : (
@@ -691,10 +704,13 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
                 if (hazard && terrain !== 'lake') cellClass += " hazard";
 
                 // Scanned applies on top of terrain — NOT mutually exclusive
+                const mobileUnfoundAtPos = !isVictimFound && !isVictimRescued && survivorAtPos?.is_mobile;
+
                 if (isScanned) cellClass += " scanned";
                 if (isBase) cellClass += " base-cell";
                 else if (survivorAtPos) {
                   if (isVictimRescued) cellClass += " rescued-cell";
+                  else if (mobileUnfoundAtPos) cellClass += " victim-mobile-cell";
                   else cellClass += " victim-cell";
                 }
                 if (highlightedVictim?.x === x && highlightedVictim?.y === y) cellClass += " victim-pinned";
@@ -703,7 +719,7 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
                   <div key={i} className={`grid-cell${cellClass}`}>
                     {isScanned && <div className="scan-tick" />}
                     {stats.mission_active && zone.survivors.find((s: any) => s.x === x && s.y === y && !s.found && !s.rescued) && (
-                      <div className="victim-dot" />
+                      <div className={mobileUnfoundAtPos ? "victim-dot mobile" : "victim-dot"} />
                     )}
                     <AnimatePresence>
                       {survivorAtPos && !isVictimRescued && (
@@ -834,7 +850,6 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           <div className="log-scroll glass" style={{ padding: '0.75rem' }}>
             <MetricsPanel
               metrics={state?.metrics ?? null}
-              staleSightings={state?.stale_sightings?.length ?? 0}
             />
           </div>
           )}
@@ -1089,6 +1104,60 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* --- MISSION HISTORY OVERLAY --- */}
+      {showHistory && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(5,10,20,0.97)', zIndex: 100,
+          display: 'flex', flexDirection: 'column',
+        }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '12px 20px', borderBottom: '1px solid #1e293b', background: '#0a0f1e', flexShrink: 0
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <History size={16} style={{ color: '#7eb3ff' }} />
+              <span style={{ color: '#e0e6ff', fontWeight: 600, fontSize: '14px', letterSpacing: '1px' }}>
+                MISSION HISTORY
+              </span>
+            </div>
+            <button
+              onClick={() => setShowHistory(false)}
+              style={{ background: 'transparent', border: 'none', color: '#64748b', cursor: 'pointer', fontSize: '18px', padding: '4px 8px' }}
+            >
+              ✕
+            </button>
+          </div>
+          <div style={{ flex: 1, overflow: 'hidden' }}>
+            {historyView === 'list' && (
+              <MissionHistory
+                onViewDetail={(id) => {
+                  setSelectedMissionId(id);
+                  setHistoryView('detail');
+                }}
+                onViewReplay={(id) => {
+                  setSelectedMissionId(id);
+                  setHistoryView('replay');
+                }}
+              />
+            )}
+            {historyView === 'detail' && selectedMissionId && (
+              <MissionDetailView
+                missionId={selectedMissionId}
+                missionIndex={selectedMissionIndex}
+                onBack={() => setHistoryView('list')}
+                onReplay={() => setHistoryView('replay')}
+              />
+            )}
+            {historyView === 'replay' && selectedMissionId && (
+              <MissionReplay
+                missionId={selectedMissionId}
+                onBack={() => setHistoryView(selectedMissionId ? 'detail' : 'list')}
+              />
+            )}
+          </div>
+        </div>
+      )}
 
       {/* --- CSS - Inline specifically for the dashboard components --- */}
       <style>{`
@@ -1456,6 +1525,21 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           border-color: rgba(255, 61, 61, 0.3) !important;
           box-shadow: inset 0 0 10px rgba(255, 61, 61, 0.1);
           animation: pulse-red 2s infinite;
+        }
+
+        .grid-cell.victim-mobile-cell {
+          background: rgba(0, 243, 255, 0.18) !important;
+          border-color: rgba(0, 243, 255, 0.5) !important;
+          box-shadow: inset 0 0 10px rgba(0, 243, 255, 0.15);
+          animation: pulse-cyan 1.5s infinite;
+        }
+        @keyframes pulse-cyan {
+          0%, 100% { box-shadow: inset 0 0 6px rgba(0,243,255,0.15), 0 0 4px rgba(0,243,255,0.3); }
+          50%       { box-shadow: inset 0 0 14px rgba(0,243,255,0.35), 0 0 8px rgba(0,243,255,0.6); }
+        }
+        .victim-dot.mobile {
+          background: #00f3ff;
+          box-shadow: 0 0 5px #00f3ff;
         }
 
         .grid-cell.rescued-cell {
