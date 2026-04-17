@@ -213,7 +213,7 @@ export default function App() {
   const [isDeploying, setIsDeploying] = useState(false);
   const [activeDroneId, setActiveDroneId] = useState<string | null>(null);
   const [logFilter, setLogFilter] = useState<'all' | 'warn' | 'error' | 'victim_found' | 'ai'>('ai');
-  const [showRtbOnly, setShowRtbOnly] = useState(false);
+  const [showRtbOnly] = useState(false);
   const [rightTab, setRightTab] = useState<'log' | 'metrics'>('log');
   const [is3DView, setIs3DView] = useState(false);
   const [victimCount, setVictimCount] = useState(10);
@@ -485,7 +485,6 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
     drone?.returning_to_base ||
     String(drone?.status_label || '').toLowerCase().includes('rtb') ||
     String(drone?.status || '').toLowerCase() === 'returning';
-  const displayedDrones = showRtbOnly ? (drones || []).filter(isReturningDrone) : (drones || []);
   const filteredLog = (log || []).filter((entry: any) => {
     if (logFilter === 'all') return true;
     return entry.level?.toLowerCase() === logFilter;
@@ -576,21 +575,13 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
               </span>
             </button>
           </div>
-          {/* Fleet controls sub-row */}
-          {leftTab === 'fleet' && (
-            <div className="fleet-controls-bar glass">
-              <button className={`toggle-btn ${showRtbOnly ? 'active' : ''}`} onClick={() => setShowRtbOnly((v) => !v)}>
-                {showRtbOnly ? 'RTB ONLY' : 'ALL'}
-              </button>
-              <span className="telemetry-count">{displayedDrones.length}</span>
-            </div>
-          )}
+
           <div className="tab-content glass scroll-area">
             {leftTab === 'victims' ? (
               <VictimListPanel survivors={zone?.survivors || []} highlighted={highlightedVictim} onSelect={setHighlightedVictim} />
             ) : (
             <div className="drone-list">
-              {displayedDrones.map((drone: any) => {
+              {(drones || []).map((drone: any) => {
                 const isOffline = !drone.is_active;
                 return (
                 <motion.div
@@ -1217,7 +1208,7 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
         .fleet-controls { margin-left: auto; display: flex; align-items: center; gap: 8px; }
         .log-filter-group { margin-left: auto; display: flex; gap: 4px; }
 
-        .tab-content { flex: 1; padding: 1rem; position: relative; overflow: hidden; }
+        .tab-content { flex: 1; padding: 0.5rem; position: relative; overflow: hidden; }
         .scroll-area { overflow-y: auto; }
         .log-scroll { flex: 1; padding: 1rem; overflow-y: auto; position: relative; }
         .scroll-to-latest-btn {
@@ -1427,8 +1418,8 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
         .slog-system.warn     { color: #ff3d3d; background: rgba(255,61,61,0.07); }
         .slog-system.dispatch { color: #a5f3fc; background: rgba(165,243,252,0.07); }
 
-        .center-map { display: flex; flex-direction: column; position: relative; padding: 1rem; }
-        .map-overlay-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+        .center-map { display: flex; flex-direction: column; position: relative; padding: 0.5rem; overflow: hidden; }
+        .map-overlay-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
         .legend { display: flex; gap: 1rem; font-size: 0.72rem; }
         .legend-item { display: flex; align-items: center; gap: 4px; opacity: 0.8; }
         .dot { width: 6px; height: 6px; border-radius: 50%; }
