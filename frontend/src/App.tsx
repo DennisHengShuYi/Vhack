@@ -499,7 +499,6 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           <Shield className="brand-logo" />
           <div className="brand-text">
             <h1>RESCUE SWARM</h1>
-            <span className="subtitle">First Responder Swarm Intelligence v2.0.0</span>
           </div>
         </div>
 
@@ -1162,8 +1161,8 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           flex-direction: column;
           height: 100vh;
           width: 100vw;
-          padding: 1rem;
-          gap: 1rem;
+          padding: 0.5rem 1rem;
+          gap: 0.5rem;
           background: radial-gradient(circle at top right, #10101a 0%, #050508 100%);
         }
 
@@ -1171,8 +1170,8 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           display: flex;
           justify-content: space-between;
           align-items: center;
-          padding: 1rem 2rem;
-          min-height: 80px;
+          padding: 0.5rem 1.5rem;
+          min-height: 56px;
         }
 
         .brand {
