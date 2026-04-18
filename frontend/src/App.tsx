@@ -28,6 +28,7 @@ import MetricsPanel from './components/MetricsPanel';
 import MissionHistory from './components/MissionHistory';
 import MissionDetailView from './components/MissionDetail';
 import MissionReplay from './components/MissionReplay';
+import RadioPanel from './components/RadioPanel';
 
 // --- Constants ---
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
@@ -218,7 +219,7 @@ export default function App() {
   const [is3DView, setIs3DView] = useState(false);
   const [victimCount, setVictimCount] = useState(10);
   const [showAssumptions, setShowAssumptions] = useState(false);
-  const [leftTab, setLeftTab] = useState<'fleet' | 'victims'>('fleet');
+  const [leftTab, setLeftTab] = useState<'fleet' | 'victims' | 'radio'>('fleet');
   const [highlightedVictim, setHighlightedVictim] = useState<{ x: number; y: number } | null>(null);
   const [missionComplete, setMissionComplete] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
@@ -574,11 +575,19 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
                 {(zone?.survivors || []).filter((s: any) => s.found && !s.rescued).length}
               </span>
             </button>
+            <button className={`left-tab-btn ${leftTab === 'radio' ? 'active' : ''}`} onClick={() => setLeftTab('radio')}>
+              <Radio size={12} /> RADIO
+              <span className={`tab-count ${(state?.leads || []).filter((l: any) => l.status === 'GROUNDED' && l.status !== 'INVESTIGATING' && l.status !== 'RESOLVED').length > 0 ? 'urgent' : ''}`}>
+                {(state?.leads || []).filter((l: any) => l.status === 'GROUNDED').length}
+              </span>
+            </button>
           </div>
 
           <div className="tab-content glass scroll-area">
             {leftTab === 'victims' ? (
               <VictimListPanel survivors={zone?.survivors || []} highlighted={highlightedVictim} onSelect={setHighlightedVictim} />
+            ) : leftTab === 'radio' ? (
+              <RadioPanel leads={state?.leads || []} />
             ) : (
             <div className="drone-list">
               {(drones || []).map((drone: any) => {
