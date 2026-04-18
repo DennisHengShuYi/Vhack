@@ -23,6 +23,8 @@ class LandmarkRegistry:
 
     def all_names_for_prompt(self) -> str:
         """Compact representation injected into LLM grounding prompt."""
-        return "; ".join(
-            f"{e['name']}({e['x']},{e['y']})" for e in self.landmarks
-        )
+        parts = []
+        for e in self.landmarks:
+            aliases = "/".join(e.get("aliases", []))
+            parts.append(f"{e['name']}[{aliases}]({e['x']},{e['y']})")
+        return "; ".join(parts)

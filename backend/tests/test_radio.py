@@ -60,3 +60,9 @@ def test_lookup_by_exact_name():
 def test_lookup_unknown_returns_none():
     reg = LandmarkRegistry()
     assert reg.lookup("xyzzy_nowhere") is None
+
+
+def test_lookup_by_alias():
+    reg = LandmarkRegistry()
+    assert reg.lookup("masjid") == (3, 2)   # BM alias for mosque
+    assert reg.lookup("tulay") == (5, 7)    # Filipino alias for bridge
