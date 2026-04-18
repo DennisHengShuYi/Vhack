@@ -21,3 +21,20 @@ def test_sim_has_leads_list():
     assert hasattr(sim, 'leads')
     assert isinstance(sim.leads, list)
     assert len(sim.leads) == 0
+
+
+def test_lead_ungrounded_construction():
+    lead = Lead(
+        id="L002", tick=1, lang="EN",
+        raw="someone near river", english="someone near river",
+        x=None, y=None, urgency="URGENT", status="PENDING_GROUND"
+    )
+    assert lead.x is None
+    assert lead.y is None
+    assert lead.status == "PENDING_GROUND"
+
+
+def test_sim_lead_counter_starts_at_zero():
+    import random; random.seed(42)
+    sim = SimulationState()
+    assert sim._lead_counter == 0

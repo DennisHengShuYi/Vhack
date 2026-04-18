@@ -124,10 +124,10 @@ class Lead:
     lang: str           # EN / BM / TL / ID / TH
     raw: str
     english: str
-    x: Optional[int]    # None if UNGROUNDED
-    y: Optional[int]
-    urgency: str        # CRITICAL / URGENT / STABLE
-    status: str         # PENDING_GROUND / GROUNDED / UNGROUNDED / INVESTIGATING / RESOLVED
+    x: Optional[int] = None    # None if UNGROUNDED
+    y: Optional[int] = None
+    urgency: str = "STABLE"        # CRITICAL / URGENT / STABLE
+    status: str = "PENDING_GROUND" # PENDING_GROUND / GROUNDED / UNGROUNDED / INVESTIGATING / RESOLVED
 
 
 class ZoneStatus(Enum):
