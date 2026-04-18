@@ -1269,4 +1269,13 @@ class SimulationState:
                 "grid_h": GRID_H,
             },
             "metrics": self.metrics.to_dict(),
+            "leads": [
+                {
+                    "id": l.id, "tick": l.tick, "lang": l.lang,
+                    "raw": l.raw, "english": l.english,
+                    "x": l.x, "y": l.y,
+                    "urgency": l.urgency, "status": l.status,
+                }
+                for l in self.leads
+            ],
         }
