@@ -38,3 +38,25 @@ def test_sim_lead_counter_starts_at_zero():
     import random; random.seed(42)
     sim = SimulationState()
     assert sim._lead_counter == 0
+
+
+from landmarks import LandmarkRegistry
+
+
+def test_registry_loads():
+    reg = LandmarkRegistry()
+    assert len(reg.landmarks) >= 5
+
+
+def test_lookup_by_exact_name():
+    reg = LandmarkRegistry()
+    result = reg.lookup("mosque")
+    assert result is not None
+    x, y = result
+    assert 0 <= x <= 19
+    assert 0 <= y <= 14
+
+
+def test_lookup_unknown_returns_none():
+    reg = LandmarkRegistry()
+    assert reg.lookup("xyzzy_nowhere") is None
