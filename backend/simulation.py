@@ -69,6 +69,24 @@ class MissionMetrics:
         default_factory=lambda: {"min_heat": 78, "min_contrast": 28}
     )
     per_drone: dict = dc_field(default_factory=dict)  # drone_id → DroneMetrics
+    # --- Performance KPIs ---
+    mission_start_time: Optional[float] = None
+    first_find_tick: Optional[int] = None
+    planning_latencies: list = dc_field(default_factory=list)
+    battery_consumed_total: float = 0.0
+
+    def record_planning_latency(self, ms: float) -> None:
+        self.planning_latencies.append(ms)
+
+    def record_first_find(self, tick: int) -> None:
+        if self.first_find_tick is None:
+            self.first_find_tick = tick
+
+    @property
+    def avg_planning_latency_ms(self) -> float:
+        if not self.planning_latencies:
+            return 0.0
+        return round(sum(self.planning_latencies) / len(self.planning_latencies), 1)
 
     @property
     def coverage_percent(self) -> float:
@@ -114,6 +132,11 @@ class MissionMetrics:
                     "current_battery": round(v.current_battery, 1),
                 }
                 for k, v in self.per_drone.items()
+            },
+            "performance": {
+                "avg_planning_latency_ms": self.avg_planning_latency_ms,
+                "first_find_tick": self.first_find_tick,
+                "battery_consumed_total": round(self.battery_consumed_total, 1),
             },
         }
 

@@ -270,6 +270,7 @@ async def run_simulation_loop():
                     terrain_at = sim.zone.terrain_types[ny][nx]
                     drain = 1.5 if terrain_at == 'forest' else 1.0
                     drone.battery = max(0.0, drone.battery - drain)
+                    sim.metrics.battery_consumed_total += drain
                     drone.status = "ON_MISSION"
                     drone.status_label = f"→({tx},{ty})"
 
