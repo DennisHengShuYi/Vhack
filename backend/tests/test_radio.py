@@ -66,3 +66,32 @@ def test_lookup_by_alias():
     reg = LandmarkRegistry()
     assert reg.lookup("masjid") == (3, 2)   # BM alias for mosque
     assert reg.lookup("tulay") == (5, 7)    # Filipino alias for bridge
+
+
+from unittest.mock import patch, MagicMock
+from radio import translate_and_ground
+
+
+def test_grounding_known_landmark():
+    mock_resp = MagicMock()
+    mock_resp.choices[0].message.content = '{"english": "person at mosque", "landmark_name": "mosque", "x": 3, "y": 2, "urgency": "CRITICAL", "confidence": 0.95}'
+
+    with patch("radio.llm_gateway.completion", return_value=mock_resp):
+        result = translate_and_ground("BM", "ada orang terperangkap di masjid")
+
+    assert result is not None
+    assert result["status"] == "GROUNDED"
+    assert result["x"] == 3
+    assert result["y"] == 2
+    assert result["urgency"] == "CRITICAL"
+
+
+def test_grounding_low_confidence_is_ungrounded():
+    mock_resp = MagicMock()
+    mock_resp.choices[0].message.content = '{"english": "someone hurt", "landmark_name": null, "x": null, "y": null, "urgency": "STABLE", "confidence": 0.3}'
+
+    with patch("radio.llm_gateway.completion", return_value=mock_resp):
+        result = translate_and_ground("EN", "someone needs help")
+
+    assert result["status"] == "UNGROUNDED"
+    assert result["x"] is None
