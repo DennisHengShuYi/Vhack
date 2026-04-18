@@ -117,6 +117,19 @@ class MissionMetrics:
             },
         }
 
+@dataclass
+class Lead:
+    id: str
+    tick: int
+    lang: str           # EN / BM / TL / ID / TH
+    raw: str
+    english: str
+    x: Optional[int]    # None if UNGROUNDED
+    y: Optional[int]
+    urgency: str        # CRITICAL / URGENT / STABLE
+    status: str         # PENDING_GROUND / GROUNDED / UNGROUNDED / INVESTIGATING / RESOLVED
+
+
 class ZoneStatus(Enum):
     UNSCANNED = "UNSCANNED"
     IN_PROGRESS = "IN_PROGRESS"
@@ -391,6 +404,8 @@ class SimulationState:
         # Initialise per-drone slots for all drones that exist at spawn
         for d_id in self.drones:
             self.metrics.init_drone(d_id)
+        self.leads: List[Lead] = []
+        self._lead_counter: int = 0
 
     def _sample_unique_points(self, count: int) -> List[tuple]:
         cells = [(x, y) for y in range(GRID_H) for x in range(GRID_W)]
