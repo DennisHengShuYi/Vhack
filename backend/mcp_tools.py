@@ -331,6 +331,20 @@ def register_tools(mcp):
                 zone_row = z_obj.sy // row_size
                 row_gap = zone_row not in active_rows  # True = this row has no active drone
 
+                # Check if zone centre is within 3 cells of a pending GROUNDED lead
+                zone_cx = (z_obj.sx + z_obj.ex) // 2
+                zone_cy = (z_obj.sy + z_obj.ey) // 2
+                adj_lead = any(
+                    chebyshev(zone_cx, zone_cy, l.x, l.y) <= 3
+                    for l in getattr(sim, 'leads', [])
+                    if l.status in ("GROUNDED", "PENDING_GROUND") and l.x is not None
+                )
+                adj_finds = any(
+                    chebyshev(zone_cx, zone_cy, s["x"], s["y"]) <= 3
+                    for s in sim.zone.survivors
+                    if s.get("found") and not s.get("rescued")
+                )
+
                 options.append({
                     "zone_id": z["zone_id"],
                     "transit": transit,
@@ -342,17 +356,15 @@ def register_tools(mcp):
                     "scan_pct": scan_pct,
                     "zone_row": zone_row,
                     "row_gap": row_gap,
+                    "adjacent_to_lead": adj_lead,
+                    "adjacent_to_finds": adj_finds,
                 })
 
-            options.sort(key=lambda x: (
-                # 1st: highest probability score first
-                -x["zone_score"],
-                # 2nd: gap rows as tiebreaker within similar scores
-                0 if x["row_gap"] else 1,
-                # 3rd: nearest first
-                x["transit"]
-            ))
-            valid_options = [o for o in options if o["total"] + BATTERY_RETURN_RESERVE <= drone.battery][:3]
+            valid_options = [
+                o for o in options
+                if o["total"] + BATTERY_RETURN_RESERVE <= drone.battery
+            ][:6]
+            # No pre-sorting — agent decides which factor matters most
 
             if not valid_options:
                 report.append("  * REC: return_to_base() | Battery too low for any zone.")
@@ -363,10 +375,12 @@ def register_tools(mcp):
                     has_residual = bool(sim.zone.zones[opt['zone_id']].residual_path)
                     partial = " [PARTIAL-resume]" if has_residual else ""
                     gap_tag = " [GAP-ROW: no drone in this sector]" if opt["row_gap"] else ""
+                    lead_tag = " [LEAD-NEARBY]" if opt["adjacent_to_lead"] else ""
+                    find_tag = " [FIND-NEARBY]" if opt["adjacent_to_finds"] else ""
                     report.append(
                         f"  Opt {i+1}: assign_scan_zone(\"{d_id}\", \"{opt['zone_id']}\") "
                         f"- Score={opt['zone_score']:.2f}, Transit={opt['transit']}, Cost={opt['total']}, "
-                        f"Risk={risk}, Terrain=[{opt['terrain']}], Scanned={opt['scan_pct']}%{partial}{gap_tag}"
+                        f"Risk={risk}, Terrain=[{opt['terrain']}], Scanned={opt['scan_pct']}%{partial}{gap_tag}{lead_tag}{find_tag}"
                     )
 
         return "\n".join(report)
@@ -709,3 +723,68 @@ def register_tools(mcp):
 
         return f"SUCCESS: {drone_id} force-reassigned to {zone_id}. {result['message']}"
 
+    @mcp.tool()
+    def get_pending_leads() -> str:
+        """Returns GROUNDED and PENDING_GROUND radio leads awaiting investigation."""
+        sim = shared.sim
+        pending = [l for l in getattr(sim, 'leads', []) if l.status in ("GROUNDED", "PENDING_GROUND")]
+        if not pending:
+            return "NO_PENDING_LEADS"
+        lines = ["=== PENDING RADIO LEADS ==="]
+        for l in pending:
+            coord = f"({l.x},{l.y})" if l.x is not None else "UNGROUNDED"
+            lines.append(
+                f"  [{l.id}] {l.lang} [{l.urgency}] {coord} — \"{l.english or l.raw}\""
+            )
+        return "\n".join(lines)
+
+    @mcp.tool()
+    def set_strategic_brief(posture: str, priority_zones: list, notes: str) -> str:
+        """
+        Declare strategic posture for the next 30 ticks.
+        posture: SPREAD | CONVERGE | LEAD_CHASE | RTB_CAUTIOUS
+        priority_zones: list of zone IDs to surface first in get_idle_drones()
+        notes: rationale (≤200 chars)
+        """
+        sim = shared.sim
+        valid = {"SPREAD", "CONVERGE", "LEAD_CHASE", "RTB_CAUTIOUS"}
+        if posture not in valid:
+            return f"Error: posture must be one of {sorted(valid)}"
+        sim.strategic_brief = {
+            "posture": posture,
+            "priority_zones": priority_zones,
+            "notes": notes[:200],
+            "set_at_tick": sim.tick_count,
+            "expires_at_tick": sim.tick_count + 30,
+        }
+        return f"Strategic brief set: {posture} | priority={priority_zones} | '{notes[:60]}'"
+
+    @mcp.tool()
+    def investigate_lead(drone_id: str, x: int, y: int, reason: str) -> str:
+        """
+        Dispatch drone to (x,y) to investigate a radio lead. Skips zone-assignment flow.
+        Marks any GROUNDED lead at (x,y) as INVESTIGATING.
+        """
+        sim = shared.sim
+        drone = sim.drones.get(drone_id)
+        if not drone:
+            return f"Error: Drone {drone_id} not found"
+        if not drone.is_active:
+            return f"Error: {drone_id} is not active"
+        x = max(0, min(sim.zone.width - 1, x))
+        y = max(0, min(sim.zone.height - 1, y))
+        path = sim.compute_path(drone.x, drone.y, x, y)
+        if not path:
+            return f"Error: No path from ({drone.x},{drone.y}) to ({x},{y})"
+        drone.path_queue = path
+        drone.target_x = x
+        drone.target_y = y
+        drone.voice_override = True
+        drone.status_label = f"LEAD→({x},{y})"
+        # Mark matching lead as INVESTIGATING
+        for lead in getattr(sim, 'leads', []):
+            if lead.x == x and lead.y == y and lead.status in ("GROUNDED", "PENDING_GROUND"):
+                lead.status = "INVESTIGATING"
+                break
+        sim.log(f"🔍 {drone_id} → LEAD INVESTIGATE ({x},{y}): {reason}", "AI", drone_id)
+        return f"{drone_id} dispatched to ({x},{y}) via {len(path)} steps. Reason: {reason}"

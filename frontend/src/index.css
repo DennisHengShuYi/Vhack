@@ -46,11 +46,11 @@ h1, h2, h3, .font-mono {
   background: transparent;
   border: 1px solid var(--accent-cyan);
   color: var(--accent-cyan);
-  padding: 10px 20px;
+  padding: 6px 14px;
   border-radius: 4px;
   cursor: pointer;
   font-family: 'Orbitron', sans-serif;
-  font-size: 0.8rem;
+  font-size: 0.75rem;
   transition: all 0.3s ease;
   text-transform: uppercase;
   position: relative;

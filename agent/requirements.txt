@@ -5,3 +5,5 @@ langgraph
 mcp
 aiohttp
 python-dotenv
+azure-keyvault-secrets
+azure-identity

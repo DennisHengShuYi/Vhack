@@ -18,7 +18,7 @@ BATTERY_DRAIN_MOVE   = 1.0    # % per cell moved
 BATTERY_DRAIN_SCAN   = 1.0    # % per thermal scan
 LOW_BATTERY_THRESHOLD = 25.0  # % — recall threshold
 BATTERY_RETURN_RESERVE = 8.0  # % — emergency reserve after reaching base
-TERRAIN_SCAN_WEIGHT: Dict[str, int] = {'city': 5, 'forest': 2, 'flat': 1}
+TERRAIN_SCAN_WEIGHT: Dict[str, int] = {'hazard': 7, 'city': 5, 'forest': 2, 'flat': 1}
 NUM_DRONES           = 5
 
 # ─── Victim Condition Constants ────────────────────────────────────────────────
@@ -69,6 +69,24 @@ class MissionMetrics:
         default_factory=lambda: {"min_heat": 78, "min_contrast": 28}
     )
     per_drone: dict = dc_field(default_factory=dict)  # drone_id → DroneMetrics
+    # --- Performance KPIs ---
+    mission_start_time: Optional[float] = None
+    first_find_tick: Optional[int] = None
+    planning_latencies: list = dc_field(default_factory=list)
+    battery_consumed_total: float = 0.0
+
+    def record_planning_latency(self, ms: float) -> None:
+        self.planning_latencies.append(ms)
+
+    def record_first_find(self, tick: int) -> None:
+        if self.first_find_tick is None:
+            self.first_find_tick = tick
+
+    @property
+    def avg_planning_latency_ms(self) -> float:
+        if not self.planning_latencies:
+            return 0.0
+        return round(sum(self.planning_latencies) / len(self.planning_latencies), 1)
 
     @property
     def coverage_percent(self) -> float:
@@ -115,7 +133,35 @@ class MissionMetrics:
                 }
                 for k, v in self.per_drone.items()
             },
+            "performance": {
+                "avg_planning_latency_ms": self.avg_planning_latency_ms,
+                "first_find_tick": self.first_find_tick,
+                "battery_consumed_total": round(self.battery_consumed_total, 1),
+            },
         }
+
+@dataclass
+class Lead:
+    id: str
+    tick: int
+    lang: str           # EN / BM / TL / ID / TH
+    raw: str
+    english: str
+    x: Optional[int] = None    # None if UNGROUNDED
+    y: Optional[int] = None
+    urgency: str = "STABLE"        # CRITICAL / URGENT / STABLE
+    status: str = "PENDING_GROUND" # PENDING_GROUND / GROUNDED / UNGROUNDED / INVESTIGATING / RESOLVED
+
+@dataclass
+class TimelineEvent:
+    id: str
+    tick: int
+    ts: str             # ISO timestamp string
+    kind: str           # DECISION / LEAD_INVESTIGATE / BRAIN_SWITCH / CONTRACT / ERROR / TOOL_CALL
+    brain: str          # CLOUD / EDGE / RULES
+    duration_ms: float
+    payload: dict       # kind-specific data
+
 
 class ZoneStatus(Enum):
     UNSCANNED = "UNSCANNED"
@@ -253,6 +299,42 @@ class DisasterZone(BaseModel):
                     for gx in range(ax, min(ax + arm_w, self.width - 1)):
                         self.terrain_types[gy][gx] = 'city'
 
+            # ── 1b. Hazard: one small BFS blob grown strictly inside city cells ──
+            # Hazard cells are a *label*, not an impassability marker — drones can
+            # still traverse them. The higher scan weight (7 vs city 5) makes them
+            # the top survivor-probability tier.
+            city_cells = [
+                (x, y)
+                for y in range(1, self.height - 1)
+                for x in range(1, self.width - 1)
+                if self.terrain_types[y][x] == 'city'
+            ]
+            if city_cells:
+                seed = random.choice(city_cells)
+                self.terrain_types[seed[1]][seed[0]] = 'hazard'
+                frontier = [seed]
+                target = random.randint(5, 10)
+                count = 1
+                dirs_h = [(0,1),(0,-1),(1,0),(-1,0),(1,1),(1,-1),(-1,1),(-1,-1)]
+                while count < target and frontier:
+                    idx = random.randint(0, len(frontier) - 1)
+                    ox, oy = frontier[idx]
+                    random.shuffle(dirs_h)
+                    grew = False
+                    for dx, dy in dirs_h:
+                        nx2, ny2 = ox + dx, oy + dy
+                        if (0 <= nx2 < self.width and 0 <= ny2 < self.height
+                                and self.terrain_types[ny2][nx2] == 'city'):
+                            self.terrain_types[ny2][nx2] = 'hazard'
+                            frontier.append((nx2, ny2))
+                            count += 1
+                            grew = True
+                            if count >= target:
+                                break
+                            break
+                    if not grew:
+                        frontier.pop(idx)
+
             # ── 2. Forest: 1–2 large contiguous woodland patches (BFS-grown) ──
             for _ in range(random.randint(1, 2)):
                 fsize = random.randint(25, 35)
@@ -308,7 +390,7 @@ class DisasterZone(BaseModel):
                 "SOS signal — weak thermal signature",
                 "Survivor with broken leg near wall",
             ]
-            TERRAIN_WEIGHTS = {'city': 5, 'forest': 2, 'flat': 1, 'lake': 0}
+            TERRAIN_WEIGHTS = {'hazard': 7, 'city': 5, 'forest': 2, 'flat': 1, 'lake': 0}
 
             # Build candidate pool weighted by terrain
             pool = []
@@ -391,6 +473,14 @@ class SimulationState:
         # Initialise per-drone slots for all drones that exist at spawn
         for d_id in self.drones:
             self.metrics.init_drone(d_id)
+        self.strategic_brief: dict = {}  # {posture, priority_zones, notes, set_at_tick, expires_at_tick}
+        self.brain_mode: str = "AUTO"    # AUTO / CLOUD / EDGE / RULES
+        self.brain_active: str = "CLOUD" # current provider in use
+        self.leads: List[Lead] = []
+        self._lead_counter: int = 0
+        self.timeline: list[TimelineEvent] = []
+        self._timeline_counter: int = 0
+        self._timeline_cap: int = 200
 
     def _sample_unique_points(self, count: int) -> List[tuple]:
         cells = [(x, y) for y in range(GRID_H) for x in range(GRID_W)]
@@ -650,7 +740,7 @@ class SimulationState:
         Groups cells into terrain tiers (city > forest > flat), then within
         each tier uses spatial clustering to minimize backtracking.
         All accessible, unscanned cells are included — full coverage guaranteed."""
-        cells_by_tier: Dict[int, List[tuple]] = {5: [], 2: [], 1: []}
+        cells_by_tier: Dict[int, List[tuple]] = {7: [], 5: [], 2: [], 1: []}
 
         for y in range(zone.sy, zone.ey + 1):
             for x in range(zone.sx, zone.ex + 1):
@@ -659,13 +749,13 @@ class SimulationState:
                 if self.zone.scanned_cells[y][x]:
                     continue
                 weight = TERRAIN_SCAN_WEIGHT.get(self.zone.terrain_types[y][x], 1)
-                cells_by_tier[weight].append((x, y))
+                cells_by_tier.setdefault(weight, []).append((x, y))
 
         # Within each tier, sort by proximity to minimize backtracking
         # Use nearest-neighbor greedy ordering
         ordered: List[tuple] = []
         cx, cy = start_x, start_y
-        for tier in (5, 2, 1):  # city first, then forest, then flat
+        for tier in (7, 5, 2, 1):  # hazard, city, forest, flat
             remaining = list(cells_by_tier[tier])
             while remaining:
                 best_idx = 0
@@ -1183,7 +1273,7 @@ class SimulationState:
                             and not self.zone.scanned_cells[ny][nx]
                             and not self.is_inaccessible(nx, ny)
                             and (nx, ny) not in path_set
-                            and self.zone.terrain_types[ny][nx] in ('city', 'forest')):
+                            and self.zone.terrain_types[ny][nx] in ('hazard', 'city', 'forest')):
                         candidates.append((nx, ny))
 
         if not candidates:
@@ -1249,9 +1339,31 @@ class SimulationState:
                 "victims_rescued": self.total_rescued,
                 "mission_active": self.mission_active,
                 "elapsed_ts": self._ts(),
+                "elapsed_sec": round(time.time() - self.mission_start_time, 1) if self.mission_start_time and self.mission_active else 0,
                 "eta_ts": self.get_estimated_finish_time(),
                 "grid_w": GRID_W,
                 "grid_h": GRID_H,
             },
             "metrics": self.metrics.to_dict(),
+            "brain": {
+                "mode": self.brain_mode,
+                "active": self.brain_active,
+            },
+            "leads": [
+                {
+                    "id": l.id, "tick": l.tick, "lang": l.lang,
+                    "raw": l.raw, "english": l.english,
+                    "x": l.x, "y": l.y,
+                    "urgency": l.urgency, "status": l.status,
+                }
+                for l in self.leads
+            ],
+            "timeline": [
+                {
+                    "id": e.id, "tick": e.tick, "ts": e.ts,
+                    "kind": e.kind, "brain": e.brain,
+                    "duration_ms": e.duration_ms, "payload": e.payload,
+                }
+                for e in self.timeline[-200:]
+            ],
         }

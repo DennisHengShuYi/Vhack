@@ -20,7 +20,8 @@ import {
   Info,
   X,
   Mic,
-  Radio
+  Radio,
+  GitBranch
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import Map3D from './components/Map3D';
@@ -28,6 +29,9 @@ import MetricsPanel from './components/MetricsPanel';
 import MissionHistory from './components/MissionHistory';
 import MissionDetailView from './components/MissionDetail';
 import MissionReplay from './components/MissionReplay';
+import RadioPanel from './components/RadioPanel';
+import ReasoningTimeline from './components/ReasoningTimeline';
+import BrainPill from './components/BrainPill';
 
 // --- Constants ---
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
@@ -103,15 +107,31 @@ function StructuredLogText({ text }: { text: string }) {
   );
 }
 
+/** Classify an AI-log entry by its leading tag so we can colour-code
+ *  Commander / Pilot / fallback / voice-radio sub-agents distinctly. */
+function classifyAgent(text: string): { brain: string; label: string } {
+  const t = text.trimStart();
+  if (/^\[COMMANDER/i.test(t))          return { brain: 'commander',  label: '◆ COMMANDER' };
+  const pilotMatch = t.match(/^\[PILOT-([A-Z0-9-]+)\]/i);
+  if (pilotMatch)                       return { brain: 'pilot',      label: `▲ PILOT ${pilotMatch[1]}` };
+  if (/^\[SMART-FALLBACK\]|^\[AUTO\]/i.test(t)) return { brain: 'fallback', label: '■ RULE-BASED' };
+  if (/^\[VOICE/i.test(t) || /^\[RADIO/i.test(t) || t.startsWith('📻'))
+                                        return { brain: 'radio',      label: '◉ RADIO/VOICE' };
+  return { brain: 'generic', label: '⬡ SENTINEL AI' };
+}
+
 /** Single log entry card */
 function LogEntry({ entry }: { entry: any }) {
   const isAi = entry.level?.toLowerCase() === 'ai';
+  const agent = isAi ? classifyAgent(entry.text || "") : null;
+  const classes = ['log-entry', entry.level?.toLowerCase() ?? ''];
+  if (agent) classes.push(`brain-${agent.brain}`);
   return (
-    <div className={`log-entry ${entry.level?.toLowerCase() ?? ''}`}>
+    <div className={classes.join(' ')}>
       {isAi ? (
         <>
           <div className="ai-log-header">
-            <span className="ai-log-label">⬡ SENTINEL AI</span>
+            <span className="ai-log-label">{agent!.label}</span>
             <span className="log-ts">{entry.ts}</span>
           </div>
           <div className="ai-log-body">
@@ -213,12 +233,12 @@ export default function App() {
   const [isDeploying, setIsDeploying] = useState(false);
   const [activeDroneId, setActiveDroneId] = useState<string | null>(null);
   const [logFilter, setLogFilter] = useState<'all' | 'warn' | 'error' | 'victim_found' | 'ai'>('ai');
-  const [showRtbOnly, setShowRtbOnly] = useState(false);
-  const [rightTab, setRightTab] = useState<'log' | 'metrics'>('log');
+  const [showRtbOnly] = useState(false);
+  const [rightTab, setRightTab] = useState<'log' | 'metrics' | 'timeline'>('log');
   const [is3DView, setIs3DView] = useState(false);
   const [victimCount, setVictimCount] = useState(10);
   const [showAssumptions, setShowAssumptions] = useState(false);
-  const [leftTab, setLeftTab] = useState<'fleet' | 'victims'>('fleet');
+  const [leftTab, setLeftTab] = useState<'fleet' | 'victims' | 'radio'>('fleet');
   const [highlightedVictim, setHighlightedVictim] = useState<{ x: number; y: number } | null>(null);
   const [missionComplete, setMissionComplete] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
@@ -485,7 +505,6 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
     drone?.returning_to_base ||
     String(drone?.status_label || '').toLowerCase().includes('rtb') ||
     String(drone?.status || '').toLowerCase() === 'returning';
-  const displayedDrones = showRtbOnly ? (drones || []).filter(isReturningDrone) : (drones || []);
   const filteredLog = (log || []).filter((entry: any) => {
     if (logFilter === 'all') return true;
     return entry.level?.toLowerCase() === logFilter;
@@ -499,7 +518,6 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           <Shield className="brand-logo" />
           <div className="brand-text">
             <h1>RESCUE SWARM</h1>
-            <span className="subtitle">First Responder Swarm Intelligence v2.0.0</span>
           </div>
         </div>
 
@@ -516,6 +534,7 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
         </div>
 
         <div className="header-actions">
+          <BrainPill />
           {stats.mission_active ? (
             <button className="cyber-button danger" onClick={stopMission}>STOP MISSION</button>
           ) : (
@@ -576,22 +595,22 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
                 {(zone?.survivors || []).filter((s: any) => s.found && !s.rescued).length}
               </span>
             </button>
+            <button className={`left-tab-btn ${leftTab === 'radio' ? 'active' : ''}`} onClick={() => setLeftTab('radio')}>
+              <Radio size={12} /> RADIO
+              <span className={`tab-count ${(state?.leads || []).filter((l: any) => l.status === 'GROUNDED' && l.status !== 'INVESTIGATING' && l.status !== 'RESOLVED').length > 0 ? 'urgent' : ''}`}>
+                {(state?.leads || []).filter((l: any) => l.status === 'GROUNDED').length}
+              </span>
+            </button>
           </div>
-          {/* Fleet controls sub-row */}
-          {leftTab === 'fleet' && (
-            <div className="fleet-controls-bar glass">
-              <button className={`toggle-btn ${showRtbOnly ? 'active' : ''}`} onClick={() => setShowRtbOnly((v) => !v)}>
-                {showRtbOnly ? 'RTB ONLY' : 'ALL'}
-              </button>
-              <span className="telemetry-count">{displayedDrones.length}</span>
-            </div>
-          )}
+
           <div className="tab-content glass scroll-area">
             {leftTab === 'victims' ? (
               <VictimListPanel survivors={zone?.survivors || []} highlighted={highlightedVictim} onSelect={setHighlightedVictim} />
+            ) : leftTab === 'radio' ? (
+              <RadioPanel leads={state?.leads || []} />
             ) : (
             <div className="drone-list">
-              {displayedDrones.map((drone: any) => {
+              {(drones || []).map((drone: any) => {
                 const isOffline = !drone.is_active;
                 return (
                 <motion.div
@@ -651,6 +670,7 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
             <div className="legend">
               <>
                 <span className="legend-item"><div className="dot" style={{ background: '#8a8a7a' }}></div> CITY</span>
+                <span className="legend-item"><div className="dot" style={{ background: '#7a2e22' }}></div> HAZARD</span>
                 <span className="legend-item"><div className="dot" style={{ background: '#2a5c35' }}></div> FOREST</span>
                 <span className="legend-item"><div className="dot" style={{ background: '#355f8b' }}></div> LAKE</span>
                 <span className="legend-item"><div className="dot" style={{ background: 'rgba(55,145,80,0.68)', border: '1px solid rgba(0,220,200,0.45)' }}></div> SCANNED</span>
@@ -694,10 +714,11 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
 
                 let cellClass = "";
                 if (terrain === 'city') cellClass += " city-terrain";
+                else if (terrain === 'hazard') cellClass += " hazard-terrain";
                 else if (terrain === 'forest') cellClass += " forest-terrain";
                 else if (terrain === 'lake') cellClass += " lake";
-                // hazard only for non-lake cells (lakes are naturally impassable, not red)
-                if (hazard && terrain !== 'lake') cellClass += " hazard";
+                // impassability marker (lakes / future hazards). 'hazard' terrain already handled above.
+                if (hazard && terrain !== 'lake' && terrain !== 'hazard') cellClass += " hazard";
 
                 // Scanned applies on top of terrain — NOT mutually exclusive
                 const mobileUnfoundAtPos = !isVictimFound && !isVictimRescued && survivorAtPos?.is_mobile;
@@ -781,6 +802,9 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
             <button className={`left-tab-btn ${rightTab === 'metrics' ? 'active' : ''}`} onClick={() => setRightTab('metrics')}>
               <Activity size={12} /> METRICS
             </button>
+            <button className={`left-tab-btn ${rightTab === 'timeline' ? 'active' : ''}`} onClick={() => setRightTab('timeline')}>
+              <GitBranch size={12} /> TIMELINE
+            </button>
           </div>
 
           {rightTab === 'log' && (
@@ -846,7 +870,14 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           <div className="log-scroll glass" style={{ padding: '0.75rem' }}>
             <MetricsPanel
               metrics={state?.metrics ?? null}
+              elapsedSec={state?.stats?.elapsed_sec ?? 0}
             />
+          </div>
+          )}
+
+          {rightTab === 'timeline' && (
+          <div className="log-scroll glass" style={{ padding: 0, height: '100%' }}>
+            <ReasoningTimeline events={state?.timeline || []} />
           </div>
           )}
         </section>
@@ -1162,8 +1193,8 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           flex-direction: column;
           height: 100vh;
           width: 100vw;
-          padding: 1rem;
-          gap: 1rem;
+          padding: 0.5rem 1rem;
+          gap: 0.5rem;
           background: radial-gradient(circle at top right, #10101a 0%, #050508 100%);
         }
 
@@ -1171,8 +1202,8 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           display: flex;
           justify-content: space-between;
           align-items: center;
-          padding: 1rem 2rem;
-          min-height: 80px;
+          padding: 0.5rem 1.5rem;
+          min-height: 56px;
         }
 
         .brand {
@@ -1218,7 +1249,7 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
         .fleet-controls { margin-left: auto; display: flex; align-items: center; gap: 8px; }
         .log-filter-group { margin-left: auto; display: flex; gap: 4px; }
 
-        .tab-content { flex: 1; padding: 1rem; position: relative; overflow: hidden; }
+        .tab-content { flex: 1; padding: 0.5rem; position: relative; overflow: hidden; }
         .scroll-area { overflow-y: auto; }
         .log-scroll { flex: 1; padding: 1rem; overflow-y: auto; position: relative; }
         .scroll-to-latest-btn {
@@ -1359,6 +1390,38 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           white-space: pre-wrap;
           word-break: break-word;
         }
+        /* ── Sub-agent colour coding ── */
+        .log-entry.ai.brain-commander {
+          background: rgba(99, 102, 241, 0.08);
+          border-color: rgba(129, 140, 248, 0.28);
+          border-left-color: #818cf8;
+        }
+        .log-entry.ai.brain-commander .ai-log-label { color: #c7d2fe; }
+        .log-entry.ai.brain-commander .ai-log-body  { color: #e0e7ff; }
+
+        .log-entry.ai.brain-pilot {
+          background: rgba(251, 191, 36, 0.07);
+          border-color: rgba(251, 191, 36, 0.30);
+          border-left-color: #fbbf24;
+        }
+        .log-entry.ai.brain-pilot .ai-log-label { color: #fde68a; }
+        .log-entry.ai.brain-pilot .ai-log-body  { color: #fef3c7; }
+
+        .log-entry.ai.brain-fallback {
+          background: rgba(74, 222, 128, 0.06);
+          border-color: rgba(74, 222, 128, 0.28);
+          border-left-color: #4ade80;
+        }
+        .log-entry.ai.brain-fallback .ai-log-label { color: #86efac; }
+        .log-entry.ai.brain-fallback .ai-log-body  { color: #dcfce7; }
+
+        .log-entry.ai.brain-radio {
+          background: rgba(167, 139, 250, 0.07);
+          border-color: rgba(167, 139, 250, 0.30);
+          border-left-color: #a78bfa;
+        }
+        .log-entry.ai.brain-radio .ai-log-label { color: #ddd6fe; }
+        .log-entry.ai.brain-radio .ai-log-body  { color: #ede9fe; }
         .log-entry.warn { color: #ffb300; opacity: 0.9; }
         .log-entry.error { color: #ff3d3d; font-weight: bold; background: rgba(255, 61, 61, 0.1); padding: 2px 4px; }
         .log-entry.success { color: #00ff88; text-shadow: 0 0 5px rgba(0, 255, 136, 0.3); }
@@ -1428,8 +1491,8 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
         .slog-system.warn     { color: #ff3d3d; background: rgba(255,61,61,0.07); }
         .slog-system.dispatch { color: #a5f3fc; background: rgba(165,243,252,0.07); }
 
-        .center-map { display: flex; flex-direction: column; position: relative; padding: 1rem; }
-        .map-overlay-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+        .center-map { display: flex; flex-direction: column; position: relative; padding: 0.5rem; overflow: hidden; }
+        .map-overlay-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
         .legend { display: flex; gap: 1rem; font-size: 0.72rem; }
         .legend-item { display: flex; align-items: center; gap: 4px; opacity: 0.8; }
         .dot { width: 6px; height: 6px; border-radius: 50%; }
@@ -1481,12 +1544,16 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           border-color: rgba(0, 220, 200, 0.45) !important;
         }
         /* Flat scanned: cyan wash */
-        .grid-cell.scanned:not(.city-terrain):not(.forest-terrain):not(.lake) {
+        .grid-cell.scanned:not(.city-terrain):not(.hazard-terrain):not(.forest-terrain):not(.lake) {
           background: rgba(0, 180, 160, 0.28);
         }
         /* City scanned: bleached concrete — much lighter than unscanned grey */
         .grid-cell.city-terrain.scanned {
           background: rgba(195, 200, 178, 0.65) !important;
+        }
+        /* Hazard scanned: lighter damaged-urban red */
+        .grid-cell.hazard-terrain.scanned {
+          background: rgba(180, 85, 72, 0.72) !important;
         }
         /* Forest scanned: bright canopy green — clearly lighter than deep forest */
         .grid-cell.forest-terrain.scanned {
@@ -1556,6 +1623,24 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
             transparent 3px,
             rgba(200,200,180,0.08) 3px,
             rgba(200,200,180,0.08) 4px
+          );
+          pointer-events: none;
+        }
+        /* Hazard: damaged urban block inside the city — darker red with cracked-wall hatching */
+        .grid-cell.hazard-terrain {
+          background: rgba(122, 46, 34, 0.72);
+          border-color: rgba(220, 80, 60, 0.55);
+          box-shadow: inset 0 0 6px rgba(255, 80, 60, 0.25);
+        }
+        .grid-cell.hazard-terrain::after {
+          content: '';
+          position: absolute; inset: 1px;
+          background: repeating-linear-gradient(
+            135deg,
+            transparent 0px,
+            transparent 3px,
+            rgba(255, 140, 120, 0.18) 3px,
+            rgba(255, 140, 120, 0.18) 4px
           );
           pointer-events: none;
         }
