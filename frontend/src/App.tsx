@@ -31,6 +31,7 @@ import MissionDetailView from './components/MissionDetail';
 import MissionReplay from './components/MissionReplay';
 import RadioPanel from './components/RadioPanel';
 import ReasoningTimeline from './components/ReasoningTimeline';
+import BrainPill from './components/BrainPill';
 
 // --- Constants ---
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
@@ -517,6 +518,7 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
         </div>
 
         <div className="header-actions">
+          <BrainPill />
           {stats.mission_active ? (
             <button className="cyber-button danger" onClick={stopMission}>STOP MISSION</button>
           ) : (
