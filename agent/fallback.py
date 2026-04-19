@@ -4,7 +4,7 @@ WeightedPlanner — scored rule-based drone assignment.
 Replaces greedy _rule_based_assignments() in agent.py.
 Parses all options from get_idle_drones() poll text — no extra MCP calls.
 
-Score = (zone_score × 3.0) + (1/transit × 2.0) + (gap_row × 1.0) + (partial × 0.5) + (lead_nearby × 2.0) + (find_nearby × 1.5)
+Score = (zone_score × 6.0) + (1/√transit × 1.5) + (gap_row × 1.0) + (partial × 0.5) + (lead_nearby × 2.0) + (find_nearby × 1.5)
 """
 import re
 from typing import Optional
@@ -76,9 +76,13 @@ class WeightedPlanner:
     def _score(self, opt: dict) -> float:
         if opt.get("rtb"):
             return -1.0
+        # Use sqrt decay for transit so city/forest zones aren't swamped by
+        # proximity bonuses. A nearby flat zone (transit=1) used to get +2.0
+        # while a distant city zone got only +0.25 — city now wins correctly.
+        transit_bonus = 1.0 / (max(opt["transit"], 1) ** 0.5)
         return (
-            opt["score"] * 3.0
-            + (1.0 / max(opt["transit"], 1)) * 2.0
+            opt["score"] * 6.0
+            + transit_bonus * 1.5
             + (1.0 if opt["gap_row"] else 0.0)
             + (0.5 if opt["partial"] else 0.0)
             + (2.0 if opt.get("adjacent_to_lead") else 0.0)

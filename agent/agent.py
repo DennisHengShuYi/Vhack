@@ -1,629 +1,653 @@
 """
-SENTINEL Agent Orchestrator — LangChain + LangGraph + GPT-4o via MCP.
+SENTINEL Agent Orchestrator — Commander-Pilot Multi-Agent Architecture.
 
 Architecture:
-  - Connects to backend/server.py via MCP stdio
-  - Discovers tools (list_drones, get_idle_drones, assign_scan_zone, return_to_base, etc.)
-  - Two-phase loop:
-      PHASE 1 (POLL): Calls get_idle_drones() — no LLM, cheap MCP call
-      PHASE 2 (EXECUTE): If idle drones exist, invokes GPT-4o via LangGraph ReAct agent
-  - Streams chain-of-thought reasoning to frontend via POST /log and /log/stream (live)
-  - Falls back to rule-based planner if LLM is unavailable or times out
+  - AgentOrchestrator: Thin poller. Fires events to Commander and Pilot tasks.
+  - Commander: Strategic LLM agent. Updates shared Blackboard (priority map + posture).
+  - Pilot: Tactical LLM agent (one per drone). Wakes on idle, reads Blackboard, commits zone claims.
+  - Blackboard: Shared state for coordination.
 """
 import os
 import sys
 import asyncio
 import aiohttp
+import re
+import json
 from typing import Optional
+from dataclasses import dataclass, field
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from langchain_mcp_adapters.tools import load_mcp_tools
-from langgraph.prebuilt import create_react_agent
 from dotenv import load_dotenv
-from memory import MissionMemory  
-from contracts import ContractChecker  
-from fallback import WeightedPlanner  
-from session_log import SessionLog  
-from hooks import ToolHooks  
+
+from agent.memory import MissionMemory  
+from agent.contracts import ContractChecker  
+from agent.fallback import WeightedPlanner  
+from agent.session_log import SessionLog  
+from agent.hooks import ToolHooks  
 
 load_dotenv()
 
-# ─── System Prompt ─────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """You are SENTINEL — the Strategic AI Commander of a 5-drone autonomous rescue swarm.
+# ─── Data Structures ───────────────────────────────────────────────────────────
 
-=== OPERATIONAL ZONE ===
-Disaster grid: 20×15. Twelve search sectors (4 columns × 3 rows, each 5×5 cells):
+@dataclass
+class ZoneClaim:
+    drone_id: str
+    committed_at_tick: int
+    expires_at_tick: int
 
-  ROW 0 (y 0–4):   Z0 (NW), Z1 (N), Z2 (NE), Z3 (NE2)
-  ROW 1 (y 5–9):   Z4 (W),  Z5 (C), Z6 (CE), Z7 (E)
-  ROW 2 (y 10–14): Z8 (SW), Z9 (S), Z10 (SE), Z11 (SE2)
 
-Zone scores are computed from terrain weights and updated in real-time as cells are scanned — higher score means more expected survivors remaining in the zone.
+@dataclass
+class Blackboard:
+    priority_map: dict        # zone_id → float weight; Commander writes, Pilots read
+    posture: str              # SPREAD | CONVERGE | LEAD_CHASE | RTB_CAUTIOUS
+    urgent_redirect: tuple | None  # (x, y, reason) — Pilot sets to None after consuming
+    updated_at_tick: int
+    tick: int                 # current Orchestrator tick; updated each poll cycle
+    zone_claims: dict         # zone_id → ZoneClaim (COMMITTED only, no PENDING)
+    lock: asyncio.Lock
 
-=== TERRAIN TYPES ===
-- CITY cells: Dense population — highest survivor probability. Zones with City terrain are HIGH priority.
-- FOREST cells: Hikers/campers — moderate survivor probability. Slightly higher battery cost to traverse.
-- FLAT cells: Open ground — low baseline probability.
-- LAKE cells: Water — no survivors, impassable (drones route around them).
-The Terrain=[...] field in each option shows cell counts per type — use this to prioritise zones with more City cells when distances are similar.
 
-=== YOUR MANDATE ===
-For EVERY idle drone, output EXACTLY this analysis block BEFORE any tool calls:
+# ─── Commander Agent ───────────────────────────────────────────────────────────
 
-  DRONE [id] @ (x,y) | Battery: B%
-    TRADEOFF: [1 sentence comparing the top 2 options — proximity vs priority]
-    DECISION → [zone_id]: [reason in ≤15 words]
+COMMANDER_SYSTEM_PROMPT = """You are SENTINEL Commander — strategic brain of the 5-drone rescue swarm.
 
-Then execute ALL assignments in one batch of tool calls.
-Never call assign_scan_zone() before writing the analysis block for that drone.
-If "Battery too low" → write DECISION → RTB: battery insufficient, then call return_to_base().
+Your job: assess the full fleet state and set priorities that all Pilot agents will follow.
 
-After all analysis blocks, write one mission-level note:
-  MISSION PULSE: [1 sentence on coverage pace or any zone needing urgent attention]
+Output EXACTLY this format (all four lines required):
+POSTURE: <SPREAD|CONVERGE|LEAD_CHASE|RTB_CAUTIOUS>
+PRIORITY: <Z0=X.X, Z1=X.X, Z2=X.X, ...>  (list every zone; city zones get 7-10, forest 4-6, flat 1-3)
+REDIRECT: (<x>, <y>): <reason>  (omit this line entirely if no urgent redirect)
+BRIEF: <1-2 sentences on current mission state and what Pilots should focus on>
 
-=== FULL COVERAGE MANDATE ===
-You do NOT know how many survivors exist. The mission is complete ONLY when every zone is COMPLETE (all accessible cells scanned). Never assume the mission is done early. Every zone must be fully searched.
-
-=== DYNAMIC PRIORITY ===
-Zone scores update during the mission:
-- When a survivor is found, all unscanned cells in adjacent zones get a ×1.5 probability boost — their Score increases automatically in the next options menu.
-- As cells are scanned, their probability drops to 0 — zone Scores decrease naturally as coverage increases.
-- Always check current Scores in the options menu — they change throughout the mission.
-
-=== PROBABILITY-GUIDED DECISIONS ===
-Use get_probability_map() to see all zone scores at once. Score reflects terrain weights and Bayesian updates from scan results — higher score means more likely to contain undiscovered survivors. Options in get_idle_drones() are already sorted by score, so Opt 1 is always the best choice unless zone uniqueness forces otherwise.
-
-=== ZONE SPLITTING ===
-When 2+ idle drones are available and a zone has Score > 1.5, consider using split_scan_zone(drone_a, drone_b, zone_id) to scan it in parallel. This halves scan time on high-value zones. Only split zones with Score > 1.5 — low-score zones are not worth the coordination cost.
-
-=== CRITICAL — ZONE UNIQUENESS ===
-Within a single planning block, EVERY drone MUST have a DIFFERENT DECISION zone.
-- Scan all DECISION → lines you have written — no two can share the same zone_id.
-- If a conflict exists, change the later drone to its next-best option BEFORE calling any tools.
-- This prevents "zone already IN_PROGRESS" errors and wasted LLM round-trips.
-
-=== THREE-LAYER DECISION MODEL ===
-
-SAFETY (rules enforce — you cannot override):
-- Battery-infeasible options are filtered before you see them. Hooks auto-RTB any drone battery < 35%.
-- Hooks block zone assignments already IN_PROGRESS.
-
-TACTICS (your core job every tick):
-- The options menu is UNSORTED — Opt 1 is NOT always best.
-- Weigh: zone_score (Bayesian survivor probability), terrain (City > Forest > Flat),
-  [GAP-ROW] (spread coverage), [LEAD-NEARBY] (radio intel nearby, +2.0 priority),
-  [FIND-NEARBY] (cluster search, +1.5 priority), [PARTIAL-resume] (resume partial scan),
-  transit cost, battery headroom.
-- ZONE UNIQUENESS: within one batch no two drones share a zone_id. Check all DECISION lines before calling tools.
-- Never leave an idle drone without an assignment or RTB.
-
-STRATEGY (refresh every ~30 ticks or on major event):
-- Call set_strategic_brief(posture, priority_zones, notes) to declare your posture:
-    SPREAD — early mission, maximise grid row coverage
-    CONVERGE — 50%+ coverage, focus on high-score zones
-    LEAD_CHASE — radio lead received, send nearest drone
-    RTB_CAUTIOUS — fleet avg battery < 40%, preserve capacity
-
-LEADS (radio field intel):
-- Call get_pending_leads() each decision cycle.
-- For GROUNDED CRITICAL leads: call investigate_lead(drone_id, x, y, reason) when a drone can reach in < 5 transit cells.
-- [LEAD-NEARBY] tag on a zone option means that zone is within 3 cells of a pending lead — prefer it.
-
-Write your Mission Log clearly so the human observer can follow your logic, then execute all assignments.
-
-=== MISSION START PROTOCOL ===
-When you see "MISSION START — STRATEGIC BRIEFING REQUIRED":
-1. Review the terrain analysis already logged (shows zone priorities from city/forest/lake counts).
-2. Write a concise Mission Plan BEFORE calling any tools:
-   - Review zone Scores — zones with Score > 1.5 are your primary targets (dense city/forest terrain).
-   - Assign drones to highest-Score zones first.
-   - Spread drones across the grid — do not cluster all drones in the same row or corner.
-   - Try to send at least one drone to each grid row (Row 0: Z0-Z3, Row 1: Z4-Z7, Row 2: Z8-Z11) at mission start for coverage breadth.
-3. Then execute all assignments in one pass.
-This briefing runs only once at mission start. Subsequent rounds follow the normal mandate.
+Rules:
+- City terrain zones ALWAYS get higher weight than flat zones regardless of distance
+- LEAD_CHASE posture when a GROUNDED CRITICAL lead exists
+- CONVERGE when coverage > 50% — focus on highest remaining scores
+- RTB_CAUTIOUS when fleet avg battery < 40%
+- SPREAD at mission start — distribute across grid
+- Never include "spread across rows" logic — zone score is the only priority signal
 """
 
-
-# ─── Token Streaming ───────────────────────────────────────────────────────────
-from langchain_core.callbacks import AsyncCallbackHandler
-
-class TokenStreamHandler(AsyncCallbackHandler):
-    """Streams LLM tokens to the frontend in real-time, posts full block on completion."""
-    FLUSH_EVERY = 15  # post streaming update every N tokens
-
-    def __init__(self, broadcast_fn, stream_fn, http_session):
-        self.broadcast_fn = broadcast_fn
-        self.stream_fn = stream_fn
+class Commander:
+    def __init__(self, blackboard: Blackboard, memory: MissionMemory, llm, http_session, backend_url: str):
+        self.blackboard = blackboard
+        self.memory = memory
+        self.llm = llm
         self.http_session = http_session
-        self._buffer: list[str] = []
-        self._token_count = 0
+        self.backend_url = backend_url
 
-    async def on_llm_new_token(self, token: str, **kwargs) -> None:
-        if token:
-            self._buffer.append(token)
-            self._token_count += 1
-            if self._token_count % self.FLUSH_EVERY == 0:
-                # Push live preview to frontend
-                await self.stream_fn(self.http_session, "".join(self._buffer))
+    async def run(self, trigger_queue: asyncio.Queue) -> None:
+        """Main Commander loop — wakes on trigger_queue events."""
+        while True:
+            event = await trigger_queue.get()
+            try:
+                await self._handle(event)
+            except Exception as e:
+                print(f"[COMMANDER] Error handling {event.get('event')}: {e}", file=sys.stderr)
 
-    async def on_llm_end(self, response, **kwargs) -> None:
-        if self._buffer:
-            full_text = "".join(self._buffer).strip()
-            self._buffer = []
-            self._token_count = 0
-            if full_text:
-                await self.broadcast_fn(self.http_session, full_text)
-            # Clear the live streaming buffer
-            await self.stream_fn(self.http_session, "")
+    async def _handle(self, event: dict) -> None:
+        event_type = event.get("event", "timer")
+        tick = event.get("tick", 0)
+        historical_intel = event.get("historical_intel", "")
+
+        try:
+            async with self.http_session.get(f"{self.backend_url}/state") as resp:
+                state = await resp.json()
+        except Exception as e:
+            print(f"[COMMANDER] State fetch failed: {e}", file=sys.stderr)
+            return  # keep existing blackboard — stale but valid
+
+        memory_block = self.memory.to_prompt_block()
+        hist_block = f"\n{historical_intel}\n" if historical_intel else ""
+        event_line = f"EVENT: {event_type.upper()} at tick {tick}"
+        if event.get("payload"):
+            event_line += f" — {event['payload']}"
+
+        prompt = (
+            f"{hist_block}"
+            f"{event_line}\n\n"
+            f"=== FLEET STATE ===\n{self._format_state(state)}\n"
+            f"{memory_block}"
+        )
+
+        if self.llm is None:
+            return
+
+        try:
+            response = await self.llm.ainvoke([
+                SystemMessage(content=COMMANDER_SYSTEM_PROMPT),
+                HumanMessage(content=prompt),
+            ])
+            text = response.content if hasattr(response, "content") else str(response)
+        except Exception as e:
+            print(f"[COMMANDER] LLM failed: {e}", file=sys.stderr)
+            return
+
+        priority_map, posture, urgent_redirect = self._parse_brief(text)
+        if priority_map:
+            self.blackboard.priority_map = priority_map
+        self.blackboard.posture = posture
+        self.blackboard.urgent_redirect = urgent_redirect
+        self.blackboard.updated_at_tick = tick
+
+        await self._broadcast(f"[COMMANDER BRIEF | tick={tick} | {event_type}] Posture={posture}\n{text}")
+        await self._emit_timeline(tick, event_type, posture, len(priority_map))
+
+    def _parse_brief(self, text: str) -> tuple[dict, str, Optional[tuple]]:
+        priority_map: dict[str, float] = {}
+        posture = "SPREAD"
+        urgent_redirect = None
+
+        for m in re.finditer(r'(Z\d+)\s*=\s*([\d.]+)', text):
+            priority_map[m.group(1)] = float(m.group(2))
+
+        m = re.search(r'POSTURE\s*[:\→]\s*(SPREAD|CONVERGE|LEAD_CHASE|RTB_CAUTIOUS)', text, re.IGNORECASE)
+        if m:
+            posture = m.group(1).upper()
+
+        m = re.search(r'REDIRECT\s*[:\→]?\s*\((\d+)\s*,\s*(\d+)\)\s*[:\-]?\s*(.+)', text)
+        if m:
+            urgent_redirect = (int(m.group(1)), int(m.group(2)), m.group(3).strip())
+
+        return priority_map, posture, urgent_redirect
+
+    def _format_state(self, state: dict) -> str:
+        lines = []
+        zones = state.get("zone", {}).get("zones", {})
+        for zid, zone in sorted(zones.items()):
+            score = zone.get("score", 0)
+            status = zone.get("status", "")
+            terrain = zone.get("terrain_counts", {})
+            lines.append(f"  {zid}: score={score:.1f} status={status} terrain={terrain}")
+        drones = state.get("drones", [])
+        for d in drones:
+            if d.get("is_active", True):
+                lines.append(
+                    f"  {d['id']}: battery={d.get('battery', 0):.0f}% "
+                    f"zone={d.get('assigned_zone_id', 'None')} status={d.get('status', '')}"
+                )
+        leads = state.get("leads", [])
+        for lead in leads:
+            if lead.get("status") in ("GROUNDED", "PENDING_GROUND"):
+                lines.append(
+                    f"  LEAD {lead.get('id')}: ({lead.get('x')},{lead.get('y')}) "
+                    f"urgency={lead.get('urgency')}"
+                )
+        drones_active = [d for d in drones if d.get("is_active", True)]
+        if drones_active:
+            avg_bat = sum(d.get("battery", 0) for d in drones_active) / len(drones_active)
+            lines.append(f"  Fleet avg battery: {avg_bat:.0f}%")
+        return "\n".join(lines)
+
+    async def _broadcast(self, msg: str) -> None:
+        try:
+            await self.http_session.post(
+                f"{self.backend_url}/log", params={"text": msg, "level": "AI"}
+            )
+        except Exception:
+            pass
+
+    async def _emit_timeline(self, tick: int, event_type: str, posture: str, zone_count: int) -> None:
+        try:
+            await self.http_session.post(
+                f"{self.backend_url}/timeline",
+                params={
+                    "tick": tick, "kind": "DECISION", "brain": "CLOUD", "duration_ms": 0,
+                    "payload": json.dumps({
+                        "type": "COMMANDER_BRIEF", "trigger": event_type,
+                        "posture": posture, "zones_updated": zone_count,
+                    }),
+                }
+            )
+        except Exception:
+            pass
+
+
+# ─── Pilot Agent ───────────────────────────────────────────────────────────────
+
+PILOT_SYSTEM_PROMPT = """You are a Pilot agent for an autonomous rescue drone in a search-and-rescue mission.
+
+Your job: choose the best available zone for your specific drone.
+
+Output EXACTLY this format:
+DECISION → <zone_id>: <reason in ≤10 words>
+BACKUP → <zone_id>: <reason in ≤10 words>
+
+If battery is critical (< 35%), write:
+DECISION → RTB: battery critical
+
+Rules:
+- DECISION and BACKUP must be different zones
+- Higher priority score = more likely survivors — always prefer it
+- City terrain zones have highest survivor probability
+- Follow the stated posture
+- Never pick a zone not listed in Available zones
+"""
+
+class Pilot:
+    def __init__(self, drone_id: str, blackboard: Blackboard, memory: MissionMemory, llm, mcp_session, http_session, backend_url: str):
+        self.drone_id = drone_id
+        self.blackboard = blackboard
+        self.memory = memory
+        self.llm = llm
+        self.mcp_session = mcp_session
+        self.http_session = http_session
+        self.backend_url = backend_url
+        self.hooks = ToolHooks(memory)
+        self.planner = WeightedPlanner()
+
+    async def run(self, idle_event: asyncio.Event) -> None:
+        """Main Pilot loop — wakes whenever its drone goes idle."""
+        while True:
+            await idle_event.wait()
+            idle_event.clear()
+            try:
+                await self._handle_idle()
+            except Exception as e:
+                print(f"[PILOT-{self.drone_id}] Error: {e}", file=sys.stderr)
+
+    async def _handle_idle(self) -> None:
+        tick = self.blackboard.tick
+
+        # Snapshot committed claims — brief lock, no await inside
+        async with self.blackboard.lock:
+            taken: set[str] = set(self.blackboard.zone_claims.keys())
+
+        # Fetch full state for hook validation and prompt building
+        try:
+            async with self.http_session.get(f"{self.backend_url}/state") as resp:
+                state = await resp.json()
+        except Exception:
+            state = {}
+
+        # Fetch idle drones poll text for zone options
+        try:
+            poll_result = await self.mcp_session.call_tool("get_idle_drones", {})
+            poll_text = poll_result.content[0].text if poll_result.content else ""
+        except Exception:
+            poll_text = ""
+
+        if not poll_text or "NO_IDLE_DRONES" in poll_text:
+            return
+
+        # Check urgent_redirect from Commander — consume if this drone is nearest
+        redirect = None
+        async with self.blackboard.lock:
+            if self.blackboard.urgent_redirect:
+                drone_data = next((d for d in state.get("drones", []) if d["id"] == self.drone_id), {})
+                x_r, y_r, reason_r = self.blackboard.urgent_redirect
+                dist = abs(drone_data.get("x", 0) - x_r) + abs(drone_data.get("y", 0) - y_r)
+                if dist <= 8 and self.hooks.pre_investigate_lead(self.drone_id, x_r, y_r, state):
+                    redirect = self.blackboard.urgent_redirect
+                    self.blackboard.urgent_redirect = None
+
+        if redirect:
+            x, y, reason = redirect
+            try:
+                result = await self.mcp_session.call_tool(
+                    "investigate_lead", {"drone_id": self.drone_id, "x": x, "y": y, "reason": reason}
+                )
+                msg = result.content[0].text if result.content else "done"
+                await self._broadcast(f"[PILOT-{self.drone_id}] REDIRECT→({x},{y}): {msg[:80]}")
+            except Exception as e:
+                print(f"[PILOT-{self.drone_id}] investigate error: {e}", file=sys.stderr)
+            return
+
+        # Build zone options for prompt
+        available = self._format_zones(poll_text, taken)
+        if not available:
+            await self._rtb(state)
+            return
+
+        drone_data = next((d for d in state.get("drones", []) if d["id"] == self.drone_id), {})
+        battery = drone_data.get("battery", 100.0)
+
+        # LLM reasoning or rule-based fallback
+        if self.llm:
+            prompt = (
+                f"Drone: {self.drone_id} | Battery: {battery:.0f}% | "
+                f"Posture: {self.blackboard.posture}\n"
+                f"Available zones (by priority):\n{available}"
+            )
+            try:
+                response = await self.llm.ainvoke([
+                    SystemMessage(content=PILOT_SYSTEM_PROMPT),
+                    HumanMessage(content=prompt),
+                ])
+                text = response.content if hasattr(response, "content") else str(response)
+                primary, backup = self._parse_llm_decision(text)
+                await self._broadcast(
+                    f"[PILOT-{self.drone_id}] Reasoning:\n{text}"
+                )
+            except Exception as e:
+                print(f"[PILOT-{self.drone_id}] LLM failed, using fallback: {e}", file=sys.stderr)
+                primary, backup = self._fallback_decision(poll_text, taken)
+        else:
+            primary, backup = self._fallback_decision(poll_text, taken)
+
+        if primary == "RTB" or primary is None:
+            await self._rtb(state)
+            return
+
+        # Atomic commit
+        committed = await self._commit_zone(primary, backup)
+        if committed is None:
+            await self._rtb(state)
+            return
+
+        # Pre-hook validation (battery gate, zone conflict gate)
+        validated = self.hooks.pre_assign(self.drone_id, committed, state)
+        if validated is None:
+            async with self.blackboard.lock:
+                self.blackboard.zone_claims.pop(committed, None)
+            await self._rtb(state)
+            return
+
+        # Execute MCP assignment
+        try:
+            result = await self.mcp_session.call_tool(
+                "assign_scan_zone", {"drone_id": self.drone_id, "zone_id": committed}
+            )
+            msg = result.content[0].text if result.content else "done"
+            await self._broadcast(f"[PILOT-{self.drone_id}] ✓ Assigned {committed}: {msg[:80]}")
+            self.hooks.post_assign(self.drone_id, committed, msg, tick)
+            if "survivor" in msg.lower() and ("found" in msg.lower() or "detected" in msg.lower()):
+                self.hooks.post_detect(self.drone_id, msg, tick)
+        except Exception as e:
+            print(f"[PILOT-{self.drone_id}] MCP assign error: {e}", file=sys.stderr)
+            async with self.blackboard.lock:
+                self.blackboard.zone_claims.pop(committed, None)
+
+    async def _commit_zone(self, primary: str, backup: Optional[str]) -> Optional[str]:
+        """Atomically commit primary zone; fall back to backup; return None if both taken."""
+        async with self.blackboard.lock:
+            for zone in [primary, backup]:
+                if zone and zone not in self.blackboard.zone_claims:
+                    self.blackboard.zone_claims[zone] = ZoneClaim(
+                        drone_id=self.drone_id,
+                        committed_at_tick=self.blackboard.tick,
+                        expires_at_tick=self.blackboard.tick + 60,
+                    )
+                    return zone
+        return None
+
+    def _parse_llm_decision(self, text: str) -> tuple[Optional[str], Optional[str]]:
+        primary = backup = None
+        # Optional separator: → >= :- or just space
+        m = re.search(r'DECISION\s*[→>=:\-]?\s+(\w+)', text, re.IGNORECASE)
+        if m:
+            primary = m.group(1).upper()
+        m = re.search(r'BACKUP\s*[→>=:\-]?\s+(\w+)', text, re.IGNORECASE)
+        if m:
+            backup = m.group(1).upper()
+        return primary, backup
+
+    def _fallback_decision(self, poll_text: str, taken: set) -> tuple[Optional[str], Optional[str]]:
+        actions = self.planner.assign(poll_text)
+        for action in actions:
+            if action[0] == "return" and action[1] == self.drone_id:
+                return "RTB", None
+            if action[0] == "assign" and action[1] == self.drone_id and action[2] not in taken:
+                return action[2], None
+        return None, None
+
+    def _format_zones(self, poll_text: str, taken: set) -> str:
+        """Build a priority-sorted zone list for the Pilot LLM prompt."""
+        options = self.planner._parse_options(poll_text)
+        drone_opts = options.get(self.drone_id, [])
+        lines = []
+        for opt in drone_opts:
+            if opt.get("rtb"):
+                continue
+            zone = opt["zone"]
+            if zone in taken:
+                continue
+            weight = self.blackboard.priority_map.get(zone, opt["score"])
+            tags = []
+            if opt.get("gap_row"):
+                tags.append("[GAP-ROW]")
+            if opt.get("partial"):
+                tags.append("[PARTIAL-resume]")
+            if opt.get("adjacent_to_lead"):
+                tags.append("[LEAD-NEARBY]")
+            if opt.get("adjacent_to_finds"):
+                tags.append("[FIND-NEARBY]")
+            lines.append((weight, f"  {zone} — priority={weight:.1f} score={opt['score']:.2f} transit={opt['transit']} {' '.join(tags)}".rstrip()))
+        lines.sort(reverse=True, key=lambda x: x[0])
+        return "\n".join(line for _, line in lines)
+
+    async def _rtb(self, state: dict) -> None:
+        try:
+            result = await self.mcp_session.call_tool("return_to_base", {"drone_id": self.drone_id})
+            msg = result.content[0].text if result.content else "done"
+            await self._broadcast(f"[PILOT-{self.drone_id}] RTB: {msg[:60]}")
+        except Exception as e:
+            print(f"[PILOT-{self.drone_id}] RTB error: {e}", file=sys.stderr)
+
+    async def _broadcast(self, msg: str) -> None:
+        try:
+            await self.http_session.post(
+                f"{self.backend_url}/log", params={"text": msg, "level": "AI"}
+            )
+        except Exception:
+            pass
 
 
 # ─── Agent Orchestrator ────────────────────────────────────────────────────────
+
 class AgentOrchestrator:
+
     def __init__(self, server_script_path: str):
         self.server_script_path = server_script_path
         self.backend_url = "http://127.0.0.1:8000"
         self.memory = MissionMemory()
         self.contracts = ContractChecker()
-        self.planner = WeightedPlanner()
-        self.hooks = ToolHooks(self.memory)
         self.session_log = SessionLog()
-        self._brain_active: str = "CLOUD"  # updated on failover
-        self._historical_intel: str = ""  # loaded on mission start, injected once
-        self._health_check_tick: int = 0
 
         openai_key = os.getenv("OPENAI_API_KEY")
         gemini_key = os.getenv("GEMINI_API_KEY")
         provider = os.getenv("ACTIVE_PROVIDER", "").upper()
-        model = os.getenv("LLM_MODEL", "")
+        model = os.getenv("LLM_MODEL", "gpt-4o-mini")
 
-        if provider == "GEMINI" or (not provider and gemini_key and (not openai_key or not openai_key.strip())):
+        if provider == "GEMINI" or (not provider and gemini_key and not (openai_key or "").strip()):
             if gemini_key:
                 self.llm = ChatOpenAI(
-                    model=model or "gemini-2.5-flash",
+                    model=model if model != "gpt-4o-mini" else "gemini-2.5-flash",
                     openai_api_key=gemini_key,
                     base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
                     temperature=0,
-                    streaming=True
+                    streaming=True,
                 )
-                self.llm_active = True
-                print(f"[SENTINEL] Using Gemini provider with model: {model or 'gemini-2.5-flash'}", file=sys.stderr)
+                print(f"[SENTINEL] Gemini provider: {model}", file=sys.stderr)
             else:
                 self.llm = None
-                self.llm_active = False
-                print("[SENTINEL] No GEMINI_API_KEY — rule-based fallback only.", file=sys.stderr)
+                print("[SENTINEL] No GEMINI_API_KEY — rule-based only.", file=sys.stderr)
         elif openai_key and openai_key.strip():
-            self.llm = ChatOpenAI(model=model or "gpt-4o", temperature=0, streaming=True)
-            self.llm_active = True
-            print(f"[SENTINEL] Using OpenAI provider with model: {model or 'gpt-4o'}", file=sys.stderr)
+            self.llm = ChatOpenAI(model=model, temperature=0.3, streaming=True)
+            print(f"[SENTINEL] OpenAI provider: {model}", file=sys.stderr)
         else:
             self.llm = None
-            self.llm_active = False
-            print("[SENTINEL] No API keys — rule-based fallback only.", file=sys.stderr)
+            print("[SENTINEL] No API keys — rule-based only.", file=sys.stderr)
 
-    def _init_llm_for_provider(self, provider: str) -> bool:
-        """Switch self.llm to the given provider. Returns True if successful."""
-        import llm_gateway as _gw
-        if provider == "RULES":
-            self.llm_active = False
-            self._brain_active = "RULES"
-            return True
-        if not _gw.health_check(provider):
-            return False
-        model_map = {
-            "CLOUD": os.getenv("LLM_MODEL", "gpt-4o"),
-            "EDGE": os.getenv("OLLAMA_MODEL", "llama3.1:8b"),
-        }
-        base_map = {
-            "EDGE": f"{os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434')}/v1/",
-        }
-        self.llm = ChatOpenAI(
-            model=model_map.get(provider, "gpt-4o"),
-            openai_api_key=os.getenv("OPENAI_API_KEY") if provider == "CLOUD" else "ollama",
-            base_url=base_map.get(provider, None),
-            temperature=0,
-            streaming=True,
-        )
-        self._brain_active = provider
-        self.llm_active = True
-        return True
-
-    async def _broadcast_log(self, session: aiohttp.ClientSession, msg: str):
-        """Posts a completed log entry to the backend mission log."""
-        try:
-            await session.post(f"{self.backend_url}/log", params={"text": msg, "level": "AI"})
-        except Exception as e:
-            print(f"Failed to broadcast log: {e}", file=sys.stderr)
-
-    async def _stream_log(self, session: aiohttp.ClientSession, text: str):
-        """Pushes live LLM token buffer to backend for real-time frontend display."""
-        try:
-            await session.post(f"{self.backend_url}/log/stream", params={"text": text})
-        except Exception:
-            pass
-
-    async def _emit_timeline(
-        self,
-        http_session: aiohttp.ClientSession,
-        kind: str,
-        payload: dict,
-        tick: int = 0,
-        duration_ms: float = 0.0,
-    ) -> None:
-        """Post a structured timeline event to the backend."""
-        import json as _json
-        brain = getattr(self, '_brain_active', 'CLOUD')
-        try:
-            await http_session.post(
-                f"{self.backend_url}/timeline",
-                params={
-                    "tick": tick,
-                    "kind": kind,
-                    "brain": brain,
-                    "duration_ms": duration_ms,
-                    "payload": _json.dumps(payload),
-                }
-            )
-        except Exception as e:
-            print(f"[TIMELINE] emit failed: {e}", file=sys.stderr)
-
-    async def _parallel_execute(
-        self,
-        session: ClientSession,
-        http_session: aiohttp.ClientSession,
-        actions: list[tuple],
-        state: dict | None = None,
-        tick: int = 0,
-    ) -> None:
-        """Execute all drone assignments in parallel via asyncio.gather.
-
-        Pre-hooks validate each assignment before the MCP call (battery gate,
-        zone conflict gate). Post-hooks update MissionMemory immediately after.
-        """
-        _state = state or {}
-
-        async def _call(action):
-            try:
-                if action[0] == "assign":
-                    drone_id, zone_id = action[1], action[2]
-                    # Pre-assign hook — may convert assignment to RTB
-                    validated = self.hooks.pre_assign(drone_id, zone_id, _state)
-                    if validated is None:
-                        # Hook blocked the assignment — RTB instead
-                        result = await session.call_tool(
-                            "return_to_base", {"drone_id": drone_id}
-                        )
-                        msg = result.content[0].text if result.content else "done"
-                        await self._broadcast_log(http_session, f"[HOOK-RTB] {msg}")
-                        return
-                    result = await session.call_tool(
-                        "assign_scan_zone",
-                        {"drone_id": drone_id, "zone_id": zone_id}
-                    )
-                    msg = result.content[0].text if result.content else "done"
-                    await self._broadcast_log(http_session, f"[SMART-FALLBACK] {msg}")
-                    # Post-assign hook — update memory tier 1 immediately
-                    self.hooks.post_assign(drone_id, zone_id, msg, tick)
-                    # Post-detect hook — if result mentions survivor, log tier 0
-                    if "survivor" in msg.lower() and ("found" in msg.lower() or "detected" in msg.lower()):
-                        self.hooks.post_detect(drone_id, msg, tick)
-                elif action[0] == "return":
-                    result = await session.call_tool(
-                        "return_to_base", {"drone_id": action[1]}
-                    )
-                    msg = result.content[0].text if result.content else "done"
-                    await self._broadcast_log(http_session, f"[RTB] {msg}")
-                elif action[0] == "investigate":
-                    drone_id, x, y, reason = action[1], action[2], action[3], action[4]
-                    if not self.hooks.pre_investigate_lead(drone_id, x, y, _state):
-                        result = await session.call_tool("return_to_base", {"drone_id": drone_id})
-                        msg = result.content[0].text if result.content else "done"
-                        await self._broadcast_log(http_session, f"[HOOK-RTB] {msg}")
-                        return
-                    result = await session.call_tool(
-                        "investigate_lead",
-                        {"drone_id": drone_id, "x": x, "y": y, "reason": reason}
-                    )
-                    msg = result.content[0].text if result.content else "done"
-                    await self._broadcast_log(http_session, f"[LEAD] {msg}")
-                    self.memory._append(1, f"Tick {tick}: {drone_id} → investigate ({x},{y})")
-                    await self._emit_timeline(
-                        http_session,
-                        kind="LEAD_INVESTIGATE",
-                        payload={"drone_id": drone_id, "x": x, "y": y, "reason": reason},
-                        tick=tick,
-                    )
-            except Exception as e:
-                print(f"  [PARALLEL ERROR] {e}", file=sys.stderr)
-
-        await asyncio.gather(*[_call(a) for a in actions])
-
-    def _must_skip_llm(self, poll_text: str, state: dict) -> bool:
-        """Skip LLM only when there is genuinely no tradeoff to reason about."""
-        drones_mentioned = poll_text.count("[DRONE:")
-        opt2_present = "Opt 2:" in poll_text
-        has_pending_leads = any(
-            l.get("status") in ("GROUNDED", "PENDING_GROUND")
-            for l in state.get("leads", [])
-        )
-        if opt2_present or has_pending_leads:
-            return False
-        opt1_count = poll_text.count("Opt 1:")
-        rtb_count = poll_text.count("Battery too low for any zone")
-        return (opt1_count + rtb_count) == drones_mentioned
-
-    async def _recall_all_drones(self, session: ClientSession, http_session: aiohttp.ClientSession):
-        """Sends all active drones back to base at mission end."""
-        try:
-            drones_result = await session.call_tool("list_drones", {})
-            raw = drones_result.content[0].text if drones_result.content else ""
-            drone_ids = [d.strip() for d in raw.replace("Active drones:", "").split(",") if d.strip()]
-            recalled = 0
-            for drone_id in drone_ids:
-                try:
-                    await session.call_tool("return_to_base", {"drone_id": drone_id})
-                    recalled += 1
-                except Exception:
-                    pass
-            await self._broadcast_log(http_session,
-                f"🔁 Swarm recalled — {recalled} drones returning to base. SENTINEL standing down.")
-        except Exception as e:
-            print(f"[RTB ALL] Error: {e}", file=sys.stderr)
-
-    async def run_mission_loop(self):
-        """Connects to the MCP server and runs the autonomous mission loop."""
-        print("Starting SENTINEL Agent Orchestrator...", file=sys.stderr)
-
-        server_params = StdioServerParameters(
-            command="python",
-            args=[self.server_script_path]
-        )
+    async def run_mission_loop(self) -> None:
+        print("Starting SENTINEL Commander-Pilot Agent...", file=sys.stderr)
+        server_params = StdioServerParameters(command="python", args=[self.server_script_path])
 
         async with stdio_client(server_params) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                print("Connected to MCP Drone Server.", file=sys.stderr)
-
-                tools = await load_mcp_tools(session)
-                print(f"Discovered Tools: {[t.name for t in tools]}", file=sys.stderr)
-
-                agent_executor = None
-                if self.llm_active:
-                    agent_executor = create_react_agent(self.llm, tools)
+            async with ClientSession(read, write) as mcp_session:
+                await mcp_session.initialize()
+                print("MCP connected — Commander-Pilot mode.", file=sys.stderr)
 
                 async with aiohttp.ClientSession() as http_session:
-                    token_handler = TokenStreamHandler(
-                        self._broadcast_log, self._stream_log, http_session
+                    # Shared Blackboard
+                    board = Blackboard(
+                        priority_map={},
+                        posture="SPREAD",
+                        urgent_redirect=None,
+                        updated_at_tick=0,
+                        tick=0,
+                        zone_claims={},
+                        lock=asyncio.Lock(),
                     )
-                    tick = 0
-                    mission_complete_logged = False
 
-                    while True:
-                        tick += 1
+                    # Asyncio event primitives
+                    commander_trigger: asyncio.Queue = asyncio.Queue()
+                    idle_events: dict[str, asyncio.Event] = {
+                        f"ALPHA-{i}": asyncio.Event() for i in range(1, 6)
+                    }
 
-                        # ── PHASE 1: POLL (no LLM) ──────────────────────────
-                        try:
-                            poll_result = await session.call_tool("get_idle_drones", {})
-                            poll_text = poll_result.content[0].text if poll_result.content else "NO_IDLE_DRONES"
-                        except Exception as e:
-                            print(f"[POLL] Error: {e}", file=sys.stderr)
-                            await asyncio.sleep(1.0)
-                            continue
+                    # Spawn Commander + 5 Pilot background tasks
+                    commander = Commander(board, self.memory, self.llm, http_session, self.backend_url)
+                    pilots = {
+                        did: Pilot(did, board, self.memory, self.llm, mcp_session, http_session, self.backend_url)
+                        for did in idle_events
+                    }
+                    bg_tasks = [
+                        asyncio.create_task(commander.run(commander_trigger), name="commander"),
+                        *[
+                            asyncio.create_task(pilots[did].run(idle_events[did]), name=f"pilot-{did}")
+                            for did in idle_events
+                        ],
+                    ]
 
-                        if "NO_IDLE_DRONES" in poll_text:
-                            await asyncio.sleep(0.5)
-                            continue
+                    try:
+                        await self._poll_loop(mcp_session, http_session, board, commander_trigger, idle_events)
+                    finally:
+                        for t in bg_tasks:
+                            t.cancel()
+                        await asyncio.gather(*bg_tasks, return_exceptions=True)
 
-                        print(f"\n--- SENTINEL Tick {tick} ---", file=sys.stderr)
-                        _state_for_contracts: dict = {}
+    async def _poll_loop(
+        self,
+        mcp_session,
+        http_session: aiohttp.ClientSession,
+        board: Blackboard,
+        commander_trigger: asyncio.Queue,
+        idle_events: dict[str, asyncio.Event],
+    ) -> None:
+        tick = 0
+        mission_active = False
+        mission_complete_logged = False
+        last_victim_ids: set = set()
+        last_lead_ids: set = set()
+        last_commander_tick = 0
 
-                        # ── ALL ZONES ACTIVE — idle drones RTB and wait ─────
-                        if "NO_ZONES_AVAILABLE" in poll_text:
-                            actions = self.planner.assign(poll_text)
-                            await self._parallel_execute(session, http_session, actions, _state_for_contracts, tick)
-                            await asyncio.sleep(2.0)
-                            continue
+        while True:
+            tick += 1
+            board.tick = tick
 
-                        # ── MISSION COMPLETE: recall swarm, idle until next mission ──
-                        if "MISSION COMPLETE" in poll_text:
-                            if not mission_complete_logged:
-                                mission_complete_logged = True
-                                await self._broadcast_log(http_session,
-                                    "🏁 MISSION COMPLETE — All survivors found. Recalling swarm to base.")
-                                await self._recall_all_drones(session, http_session)
-                                self.session_log.close()
-                                # Give the flush daemon thread time to write to Supabase
-                                await asyncio.sleep(5.0)
-                                await self._broadcast_log(http_session,
-                                    "⏳ SENTINEL standing by — awaiting next mission.")
-                            await asyncio.sleep(2.0)
-                            continue
+            # Scrub expired zone claims
+            async with board.lock:
+                board.zone_claims = {
+                    z: c for z, c in board.zone_claims.items()
+                    if c.expires_at_tick > tick
+                }
 
-                        # Reset memory and contracts on mission start
-                        if "MISSION START" in poll_text:
-                            mission_complete_logged = False
-                            self.memory.reset()
-                            self.contracts.reset()
-                            self.session_log.start()
-                            self._historical_intel = self.session_log.load_insights()
-                            if self._historical_intel:
-                                await self._broadcast_log(http_session,
-                                    "📚 HISTORICAL INTEL loaded from prior missions.")
-
-                        # ── PHASE 1.5: CONTRACT CHECK — fetch state, inject alerts ──
-                        try:
-                            _resp = await http_session.get(f"{self.backend_url}/state")
-                            _state_for_contracts = await _resp.json()
-                            alerts = self.contracts.check(_state_for_contracts, tick)
-                            if alerts:
-                                poll_text += "\n\n" + "\n".join(alerts)
-                                await self._emit_timeline(
-                                    http_session,
-                                    kind="CONTRACT",
-                                    payload={"alerts": alerts},
-                                    tick=tick,
-                                )
-                        except Exception as e:
-                            print(f"[CONTRACT] State fetch failed: {e}", file=sys.stderr)
-
-                        # Log tick state to JSONL
-                        try:
-                            self.session_log.log_tick(
-                                tick=tick,
-                                state=_state_for_contracts,
-                                events=list(self.memory.tier0[-3:]),
-                                decision_type="pending",
-                                assignments=[],
-                                contract_alerts=alerts if 'alerts' in dir() else [],
-                            )
-                        except Exception:
-                            pass
-
-                        # ── BRAIN HEALTH CHECK (AUTO mode only) ────────────
-                        brain_mode = _state_for_contracts.get("brain", {}).get("mode", "AUTO")
-                        self._health_check_tick += 1
-                        if brain_mode == "AUTO" and self.llm_active and self._health_check_tick % 10 == 0:
-                            import llm_gateway as _gw
-                            current = self._brain_active
-                            if not _gw.health_check(current):
-                                fallback = "EDGE" if current == "CLOUD" else "RULES"
-                                self._init_llm_for_provider(fallback)
-                                label = f"[BRAIN-SWITCH {current}→{fallback}]"
-                                await self._broadcast_log(http_session, label)
-                                await self._emit_timeline(
-                                    http_session,
-                                    kind="BRAIN_SWITCH",
-                                    payload={"from": current, "to": fallback, "auto": True},
-                                    tick=tick,
-                                )
-                                try:
-                                    await http_session.post(
-                                        f"{self.backend_url}/brain/mode",
-                                        params={"mode": self._brain_active}
-                                    )
-                                except Exception:
-                                    pass
-                        elif brain_mode in ("CLOUD", "EDGE", "RULES") and brain_mode != self._brain_active:
-                            self._init_llm_for_provider(brain_mode)
-
-                        # ── PHASE 2: EXECUTE (LLM or rule-based) ────────────
-                        is_trivial = self._must_skip_llm(poll_text, _state_for_contracts)
-
-                        if self.llm_active and agent_executor is not None and not is_trivial:
-                            # Build memory block for injection
-                            memory_block = self.memory.to_prompt_block()
-                            if memory_block:
-                                memory_block = "\n\n" + memory_block + "\n"
-
-                            historical_block = ""
-                            if self._historical_intel:
-                                historical_block = "\n\n" + self._historical_intel + "\n"
-                                self._historical_intel = ""  # inject once, then clear
-
-                            messages = [
-                                SystemMessage(content=SYSTEM_PROMPT),
-                                HumanMessage(content=f"{historical_block}{memory_block}Execute assignments for these idle drones:\n\n{poll_text}")
-                            ]
-                            try:
-                                import time as _time
-                                _llm_start = _time.monotonic()
-                                async for state in agent_executor.astream(
-                                    {"messages": messages},
-                                    config={"callbacks": [token_handler]},
-                                    stream_mode="values"
-                                ):
-                                    messages = state["messages"]
-                                    latest_msg = messages[-1]
-                                    if latest_msg.type == "ai" and getattr(latest_msg, 'tool_calls', None):
-                                        for tc in latest_msg.tool_calls:
-                                            print(f"  [CMD] {tc['name']}({tc['args']})", file=sys.stderr)
-                                    elif latest_msg.type == "tool":
-                                        content = latest_msg.content
-                                        if isinstance(content, list):
-                                            text = " ".join(
-                                                c.get("text", str(c)) for c in content if isinstance(c, dict)
-                                            )
-                                        else:
-                                            text = str(content)
-                                        print(f"  [RES] {text[:80]}", file=sys.stderr)
-                                        # Only broadcast tool errors — backend logs successful dispatches
-                                        if text.lower().startswith("error:"):
-                                            await self._broadcast_log(http_session, f"⚠️ {text}")
-
-                                # Extract and store memory events from this tick
-                                self.memory.extract(messages, tick)
-
-                                _llm_ms = (_time.monotonic() - _llm_start) * 1000
-                                try:
-                                    await http_session.post(
-                                        f"{self.backend_url}/metrics/planning-latency",
-                                        params={"ms": _llm_ms}
-                                    )
-                                except Exception:
-                                    pass
-
-                                await self._emit_timeline(
-                                    http_session,
-                                    kind="DECISION",
-                                    payload={
-                                        "drones": poll_text.count("[DRONE:"),
-                                        "tool_calls": sum(1 for m in messages if getattr(m, 'type', None) == 'tool'),
-                                    },
-                                    tick=tick,
-                                )
-
-                                # Safety net: if LLM reasoned but made no actual tool calls,
-                                # fall back to rule-based so drones never stay stuck idle.
-                                tool_executed = any(
-                                    getattr(m, 'type', None) == 'tool'
-                                    for m in messages
-                                )
-                                if not tool_executed:
-                                    print("  [FALLBACK] LLM produced no tool calls — rule-based assignment.", file=sys.stderr)
-                                    await self._broadcast_log(http_session,
-                                        "⚡ LLM reasoned without acting — auto-assigning via rule-based fallback.")
-                                    actions = self.planner.assign(poll_text)
-                                    await self._parallel_execute(session, http_session, actions, _state_for_contracts, tick)
-
-                            except asyncio.TimeoutError:
-                                await self._broadcast_log(http_session, "⏱️ LLM timeout — rule-based fallback.")
-                                actions = self.planner.assign(poll_text)
-                                await self._parallel_execute(session, http_session, actions, _state_for_contracts, tick)
-                            except Exception as e:
-                                print(f"  [ERROR] {e}", file=sys.stderr)
-                                await self._broadcast_log(http_session, f"[ERROR] {e}")
-                                actions = self.planner.assign(poll_text)
-                                await self._parallel_execute(session, http_session, actions, _state_for_contracts, tick)
-                        else:
-                            # Weighted fallback — no LLM, or trivial tick
-                            if is_trivial and self.llm_active:
-                                await self._broadcast_log(http_session,
-                                    "[AUTO] No tradeoff — single valid option per drone, rule-based assignment used")
-                            actions = self.planner.assign(poll_text)
-                            await self._parallel_execute(session, http_session, actions, _state_for_contracts, tick)
-
-                        print("-" * 30, file=sys.stderr)
-                        await asyncio.sleep(0.5)
-
-        print("[SENTINEL] Agent loop exited.", file=sys.stderr)
-
-    async def _execute_rule_based(self, session, poll_text: str):
-        """Execute rule-based assignments directly via MCP."""
-        actions = self._rule_based_assignments(poll_text)
-        for action in actions:
+            # Poll idle drones
             try:
-                if action[0] == "assign":
-                    result = await session.call_tool("assign_scan_zone",
-                                                     {"drone_id": action[1], "zone_id": action[2]})
-                    text = result.content[0].text if result.content else ""
-                    print(f"  [FALLBACK] assign {action[1]}→{action[2]}: {text[:120]}", file=sys.stderr)
-                elif action[0] == "return":
-                    result = await session.call_tool("return_to_base", {"drone_id": action[1]})
-                    text = result.content[0].text if result.content else ""
-                    print(f"  [FALLBACK] RTB {action[1]}: {text[:80]}", file=sys.stderr)
+                poll_result = await mcp_session.call_tool("get_idle_drones", {})
+                poll_text = poll_result.content[0].text if poll_result.content else "NO_IDLE_DRONES"
             except Exception as e:
-                print(f"  [FALLBACK ERROR] {e}", file=sys.stderr)
+                print(f"[POLL] Error: {e}", file=sys.stderr)
+                await asyncio.sleep(0.5)
+                continue
+
+            # Mission complete
+            if "MISSION COMPLETE" in poll_text:
+                if not mission_complete_logged:
+                    mission_complete_logged = True
+                    mission_active = False
+                    self.session_log.close()
+                    try:
+                        await http_session.post(
+                            f"{self.backend_url}/log",
+                            params={"text": "🏁 MISSION COMPLETE — SENTINEL standing down.", "level": "AI"}
+                        )
+                    except Exception:
+                        pass
+                await asyncio.sleep(2.0)
+                continue
+
+            # Mission start
+            if "MISSION START" in poll_text and not mission_active:
+                mission_active = True
+                mission_complete_logged = False
+                self.memory.reset()
+                self.contracts.reset()
+                self.session_log.start()
+                historical_intel = self.session_log.load_insights()
+                await commander_trigger.put({
+                    "event": "mission_start",
+                    "tick": tick,
+                    "payload": {},
+                    "historical_intel": historical_intel,
+                })
+                last_victim_ids = set()
+                last_lead_ids = set()
+                last_commander_tick = tick
+
+            # Fire idle events for each idle drone
+            if "NO_IDLE_DRONES" not in poll_text and "NO_ZONES_AVAILABLE" not in poll_text:
+                for m in re.finditer(r'\[DRONE:\s*(\S+)\]', poll_text):
+                    drone_id = m.group(1)
+                    if drone_id in idle_events and not idle_events[drone_id].is_set():
+                        idle_events[drone_id].set()
+
+            # Fetch full state for event detection and contract checks
+            try:
+                async with http_session.get(f"{self.backend_url}/state") as resp:
+                    state = await resp.json()
+            except Exception:
+                state = {}
+
+            if state.get("stats", {}).get("mission_active", False):
+                # Contract checks → fire Commander
+                alerts = self.contracts.check(state, tick)
+                for alert in alerts:
+                    await commander_trigger.put({"event": "contract", "tick": tick, "payload": {"alert": alert}})
+
+                # Survivor found?
+                current_victim_ids = {v.get("id") for v in state.get("victims", [])}
+                if current_victim_ids - last_victim_ids:
+                    await commander_trigger.put({"event": "survivor_found", "tick": tick, "payload": {}})
+                last_victim_ids = current_victim_ids
+
+                # New grounded lead?
+                current_lead_ids = {
+                    l.get("id") for l in state.get("leads", [])
+                    if l.get("status") in ("GROUNDED", "PENDING_GROUND")
+                }
+                if current_lead_ids - last_lead_ids:
+                    await commander_trigger.put({"event": "lead_grounded", "tick": tick, "payload": {}})
+                last_lead_ids = current_lead_ids
+
+                # Battery crisis?
+                drones_active = [d for d in state.get("drones", []) if d.get("is_active", True)]
+                if drones_active:
+                    avg_bat = sum(d.get("battery", 100) for d in drones_active) / len(drones_active)
+                    if avg_bat < 40:
+                        await commander_trigger.put({"event": "battery_crisis", "tick": tick, "payload": {"avg_battery": round(avg_bat, 1)}})
+
+                # Periodic Commander trigger every 60 ticks (30 s at 0.5 s poll)
+                if tick - last_commander_tick >= 60:
+                    last_commander_tick = tick
+                    await commander_trigger.put({"event": "timer", "tick": tick, "payload": {}})
+
+            # Log tick to JSONL
+            try:
+                self.session_log.log_tick(
+                    tick=tick, state=state,
+                    events=list(self.memory.tier0[-3:]),
+                    decision_type="commander-pilot",
+                    assignments=[],
+                    contract_alerts=alerts if "alerts" in locals() else [],
+                )
+            except Exception:
+                pass
+
+            await asyncio.sleep(0.5)
 
 
 if __name__ == "__main__":
