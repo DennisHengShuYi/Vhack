@@ -845,6 +845,7 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           <div className="log-scroll glass" style={{ padding: '0.75rem' }}>
             <MetricsPanel
               metrics={state?.metrics ?? null}
+              elapsedSec={state?.stats?.elapsed_sec ?? 0}
             />
           </div>
           )}

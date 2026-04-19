@@ -1287,6 +1287,7 @@ class SimulationState:
                 "victims_rescued": self.total_rescued,
                 "mission_active": self.mission_active,
                 "elapsed_ts": self._ts(),
+                "elapsed_sec": round(time.time() - self.mission_start_time, 1) if self.mission_start_time and self.mission_active else 0,
                 "eta_ts": self.get_estimated_finish_time(),
                 "grid_w": GRID_W,
                 "grid_h": GRID_H,

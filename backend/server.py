@@ -761,6 +761,23 @@ async def export_mission():
     return {"status": "ok", "path": str(latest), "size_bytes": latest.stat().st_size}
 
 
+@app.get("/missions/current/export")
+async def export_current_mission():
+    """Download the current mission JSONL tick log."""
+    from pathlib import Path
+    from fastapi.responses import FileResponse
+    reports_dir = Path(__file__).parent.parent / "mission_reports"
+    files = sorted(reports_dir.glob("*.jsonl")) if reports_dir.exists() else []
+    if not files:
+        return {"error": "No mission reports available"}
+    latest = files[-1]
+    return FileResponse(
+        path=str(latest),
+        media_type="application/jsonlines",
+        filename=latest.name,
+    )
+
+
 # ─── MCP Tools ────────────────────────────────────────────────────────────────
 from mcp_tools import register_tools
 register_tools(mcp)
