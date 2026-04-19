@@ -26,7 +26,9 @@ export default function BrainPill() {
       try {
         const res = await fetch(`${API_BASE}/brain/status`);
         if (res.ok) setBrain(await res.json());
-      } catch {}
+      } catch {
+        // network hiccup — retry on next interval tick
+      }
     }, 2000);
     return () => clearInterval(interval);
   }, []);
