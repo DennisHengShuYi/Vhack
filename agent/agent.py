@@ -153,6 +153,7 @@ class AgentOrchestrator:
         self.planner = WeightedPlanner()
         self.hooks = ToolHooks(self.memory)
         self.session_log = SessionLog()
+        self._brain_active: str = "CLOUD"  # updated on failover
         self._historical_intel: str = ""  # loaded on mission start, injected once
 
         openai_key = os.getenv("OPENAI_API_KEY")
@@ -197,6 +198,31 @@ class AgentOrchestrator:
             await session.post(f"{self.backend_url}/log/stream", params={"text": text})
         except Exception:
             pass
+
+    async def _emit_timeline(
+        self,
+        http_session: aiohttp.ClientSession,
+        kind: str,
+        payload: dict,
+        tick: int = 0,
+        duration_ms: float = 0.0,
+    ) -> None:
+        """Post a structured timeline event to the backend."""
+        import json as _json
+        brain = getattr(self, '_brain_active', 'CLOUD')
+        try:
+            await http_session.post(
+                f"{self.backend_url}/timeline",
+                params={
+                    "tick": tick,
+                    "kind": kind,
+                    "brain": brain,
+                    "duration_ms": duration_ms,
+                    "payload": _json.dumps(payload),
+                }
+            )
+        except Exception as e:
+            print(f"[TIMELINE] emit failed: {e}", file=sys.stderr)
 
     async def _parallel_execute(
         self,
@@ -361,6 +387,12 @@ class AgentOrchestrator:
                             alerts = self.contracts.check(_state_for_contracts, tick)
                             if alerts:
                                 poll_text += "\n\n" + "\n".join(alerts)
+                                await self._emit_timeline(
+                                    http_session,
+                                    kind="CONTRACT",
+                                    payload={"alerts": alerts},
+                                    tick=tick,
+                                )
                         except Exception as e:
                             print(f"[CONTRACT] State fetch failed: {e}", file=sys.stderr)
 
@@ -421,6 +453,16 @@ class AgentOrchestrator:
 
                                 # Extract and store memory events from this tick
                                 self.memory.extract(messages, tick)
+
+                                await self._emit_timeline(
+                                    http_session,
+                                    kind="DECISION",
+                                    payload={
+                                        "drones": poll_text.count("[DRONE:"),
+                                        "tool_calls": sum(1 for m in messages if getattr(m, 'type', None) == 'tool'),
+                                    },
+                                    tick=tick,
+                                )
 
                                 # Safety net: if LLM reasoned but made no actual tool calls,
                                 # fall back to rule-based so drones never stay stuck idle.
