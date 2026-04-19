@@ -20,7 +20,8 @@ import {
   Info,
   X,
   Mic,
-  Radio
+  Radio,
+  GitBranch
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import Map3D from './components/Map3D';
@@ -29,6 +30,7 @@ import MissionHistory from './components/MissionHistory';
 import MissionDetailView from './components/MissionDetail';
 import MissionReplay from './components/MissionReplay';
 import RadioPanel from './components/RadioPanel';
+import ReasoningTimeline from './components/ReasoningTimeline';
 
 // --- Constants ---
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
@@ -215,7 +217,7 @@ export default function App() {
   const [activeDroneId, setActiveDroneId] = useState<string | null>(null);
   const [logFilter, setLogFilter] = useState<'all' | 'warn' | 'error' | 'victim_found' | 'ai'>('ai');
   const [showRtbOnly] = useState(false);
-  const [rightTab, setRightTab] = useState<'log' | 'metrics'>('log');
+  const [rightTab, setRightTab] = useState<'log' | 'metrics' | 'timeline'>('log');
   const [is3DView, setIs3DView] = useState(false);
   const [victimCount, setVictimCount] = useState(10);
   const [showAssumptions, setShowAssumptions] = useState(false);
@@ -780,6 +782,9 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
             <button className={`left-tab-btn ${rightTab === 'metrics' ? 'active' : ''}`} onClick={() => setRightTab('metrics')}>
               <Activity size={12} /> METRICS
             </button>
+            <button className={`left-tab-btn ${rightTab === 'timeline' ? 'active' : ''}`} onClick={() => setRightTab('timeline')}>
+              <GitBranch size={12} /> TIMELINE
+            </button>
           </div>
 
           {rightTab === 'log' && (
@@ -847,6 +852,12 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
               metrics={state?.metrics ?? null}
               elapsedSec={state?.stats?.elapsed_sec ?? 0}
             />
+          </div>
+          )}
+
+          {rightTab === 'timeline' && (
+          <div className="log-scroll glass" style={{ padding: 0, height: '100%' }}>
+            <ReasoningTimeline events={state?.timeline || []} />
           </div>
           )}
         </section>
