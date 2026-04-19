@@ -697,6 +697,35 @@ async def guide_victim(drone_id: str):
     return {"status": "ok", "result": result}
 
 
+@app.post("/timeline")
+async def post_timeline(
+    tick: int,
+    kind: str,
+    brain: str = "CLOUD",
+    duration_ms: float = 0.0,
+    payload: str = "{}"
+):
+    """Agent posts structured timeline events."""
+    import json as _json
+    from datetime import datetime
+    from simulation import TimelineEvent
+    sim = shared.sim
+    sim._timeline_counter += 1
+    ev = TimelineEvent(
+        id=f"T{sim._timeline_counter:05d}",
+        tick=tick,
+        ts=datetime.utcnow().isoformat(),
+        kind=kind,
+        brain=brain,
+        duration_ms=duration_ms,
+        payload=_json.loads(payload) if payload else {},
+    )
+    sim.timeline.append(ev)
+    if len(sim.timeline) > sim._timeline_cap:
+        sim.timeline = sim.timeline[-sim._timeline_cap:]
+    return {"status": "ok", "id": ev.id}
+
+
 @app.post("/radio-intel")
 async def radio_intel(lang: str, text: str):
     """

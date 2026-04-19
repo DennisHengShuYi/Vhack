@@ -152,6 +152,16 @@ class Lead:
     urgency: str = "STABLE"        # CRITICAL / URGENT / STABLE
     status: str = "PENDING_GROUND" # PENDING_GROUND / GROUNDED / UNGROUNDED / INVESTIGATING / RESOLVED
 
+@dataclass
+class TimelineEvent:
+    id: str
+    tick: int
+    ts: str             # ISO timestamp string
+    kind: str           # DECISION / LEAD_INVESTIGATE / BRAIN_SWITCH / CONTRACT / ERROR / TOOL_CALL
+    brain: str          # CLOUD / EDGE / RULES
+    duration_ms: float
+    payload: dict       # kind-specific data
+
 
 class ZoneStatus(Enum):
     UNSCANNED = "UNSCANNED"
@@ -429,6 +439,9 @@ class SimulationState:
             self.metrics.init_drone(d_id)
         self.leads: List[Lead] = []
         self._lead_counter: int = 0
+        self.timeline: list[TimelineEvent] = []
+        self._timeline_counter: int = 0
+        self._timeline_cap: int = 200
 
     def _sample_unique_points(self, count: int) -> List[tuple]:
         cells = [(x, y) for y in range(GRID_H) for x in range(GRID_W)]
@@ -1301,5 +1314,13 @@ class SimulationState:
                     "urgency": l.urgency, "status": l.status,
                 }
                 for l in self.leads
+            ],
+            "timeline": [
+                {
+                    "id": e.id, "tick": e.tick, "ts": e.ts,
+                    "kind": e.kind, "brain": e.brain,
+                    "duration_ms": e.duration_ms, "payload": e.payload,
+                }
+                for e in self.timeline[-200:]
             ],
         }
