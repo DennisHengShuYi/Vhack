@@ -438,6 +438,8 @@ class SimulationState:
         for d_id in self.drones:
             self.metrics.init_drone(d_id)
         self.strategic_brief: dict = {}  # {posture, priority_zones, notes, set_at_tick, expires_at_tick}
+        self.brain_mode: str = "AUTO"    # AUTO / CLOUD / EDGE / RULES
+        self.brain_active: str = "CLOUD" # current provider in use
         self.leads: List[Lead] = []
         self._lead_counter: int = 0
         self.timeline: list[TimelineEvent] = []
@@ -1307,6 +1309,10 @@ class SimulationState:
                 "grid_h": GRID_H,
             },
             "metrics": self.metrics.to_dict(),
+            "brain": {
+                "mode": self.brain_mode,
+                "active": self.brain_active,
+            },
             "leads": [
                 {
                     "id": l.id, "tick": l.tick, "lang": l.lang,

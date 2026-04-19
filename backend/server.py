@@ -734,6 +734,21 @@ async def record_planning_latency(ms: float):
     return {"status": "ok"}
 
 
+@app.get("/brain/status")
+async def brain_status():
+    return {"mode": shared.sim.brain_mode, "active": shared.sim.brain_active}
+
+
+@app.post("/brain/mode")
+async def set_brain_mode(mode: str):
+    valid = {"AUTO", "CLOUD", "EDGE", "RULES"}
+    if mode.upper() not in valid:
+        return {"error": f"mode must be one of {sorted(valid)}"}
+    shared.sim.brain_mode = mode.upper()
+    shared.sim.log(f"🧠 BRAIN mode set to {mode.upper()} by operator", "INFO")
+    return {"status": "ok", "mode": shared.sim.brain_mode}
+
+
 @app.post("/radio-intel")
 async def radio_intel(lang: str, text: str):
     """
