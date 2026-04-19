@@ -21,11 +21,16 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from dotenv import load_dotenv
 
-from agent.memory import MissionMemory  
-from agent.contracts import ContractChecker  
-from agent.fallback import WeightedPlanner  
-from agent.session_log import SessionLog  
-from agent.hooks import ToolHooks  
+# Allow running as `python agent/agent.py` from project root
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
+from agent.memory import MissionMemory
+from agent.contracts import ContractChecker
+from agent.fallback import WeightedPlanner
+from agent.session_log import SessionLog
+from agent.hooks import ToolHooks
 
 load_dotenv()
 
