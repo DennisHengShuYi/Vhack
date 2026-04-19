@@ -171,6 +171,7 @@ class AgentOrchestrator:
         self.session_log = SessionLog()
         self._brain_active: str = "CLOUD"  # updated on failover
         self._historical_intel: str = ""  # loaded on mission start, injected once
+        self._health_check_tick: int = 0
 
         openai_key = os.getenv("OPENAI_API_KEY")
         gemini_key = os.getenv("GEMINI_API_KEY")
@@ -200,6 +201,33 @@ class AgentOrchestrator:
             self.llm = None
             self.llm_active = False
             print("[SENTINEL] No API keys — rule-based fallback only.", file=sys.stderr)
+
+    def _init_llm_for_provider(self, provider: str) -> bool:
+        """Switch self.llm to the given provider. Returns True if successful."""
+        import llm_gateway as _gw
+        if provider == "RULES":
+            self.llm_active = False
+            self._brain_active = "RULES"
+            return True
+        if not _gw.health_check(provider):
+            return False
+        model_map = {
+            "CLOUD": os.getenv("LLM_MODEL", "gpt-4o"),
+            "EDGE": os.getenv("OLLAMA_MODEL", "llama3.1:8b"),
+        }
+        base_map = {
+            "EDGE": f"{os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434')}/v1/",
+        }
+        self.llm = ChatOpenAI(
+            model=model_map.get(provider, "gpt-4o"),
+            openai_api_key=os.getenv("OPENAI_API_KEY") if provider == "CLOUD" else "ollama",
+            base_url=base_map.get(provider, None),
+            temperature=0,
+            streaming=True,
+        )
+        self._brain_active = provider
+        self.llm_active = True
+        return True
 
     async def _broadcast_log(self, session: aiohttp.ClientSession, msg: str):
         """Posts a completed log entry to the backend mission log."""
@@ -451,6 +479,33 @@ class AgentOrchestrator:
                             )
                         except Exception:
                             pass
+
+                        # ── BRAIN HEALTH CHECK (AUTO mode only) ────────────
+                        brain_mode = _state_for_contracts.get("brain", {}).get("mode", "AUTO")
+                        self._health_check_tick += 1
+                        if brain_mode == "AUTO" and self.llm_active and self._health_check_tick % 10 == 0:
+                            import llm_gateway as _gw
+                            current = self._brain_active
+                            if not _gw.health_check(current):
+                                fallback = "EDGE" if current == "CLOUD" else "RULES"
+                                self._init_llm_for_provider(fallback)
+                                label = f"[BRAIN-SWITCH {current}→{fallback}]"
+                                await self._broadcast_log(http_session, label)
+                                await self._emit_timeline(
+                                    http_session,
+                                    kind="BRAIN_SWITCH",
+                                    payload={"from": current, "to": fallback, "auto": True},
+                                    tick=tick,
+                                )
+                                try:
+                                    await http_session.post(
+                                        f"{self.backend_url}/brain/mode",
+                                        params={"mode": self._brain_active}
+                                    )
+                                except Exception:
+                                    pass
+                        elif brain_mode in ("CLOUD", "EDGE", "RULES") and brain_mode != self._brain_active:
+                            self._init_llm_for_provider(brain_mode)
 
                         # ── PHASE 2: EXECUTE (LLM or rule-based) ────────────
                         is_trivial = self._must_skip_llm(poll_text, _state_for_contracts)
