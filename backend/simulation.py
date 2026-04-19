@@ -437,6 +437,7 @@ class SimulationState:
         # Initialise per-drone slots for all drones that exist at spawn
         for d_id in self.drones:
             self.metrics.init_drone(d_id)
+        self.strategic_brief: dict = {}  # {posture, priority_zones, notes, set_at_tick, expires_at_tick}
         self.leads: List[Lead] = []
         self._lead_counter: int = 0
         self.timeline: list[TimelineEvent] = []
