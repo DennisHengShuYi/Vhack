@@ -60,6 +60,7 @@ function toWorld(x: number, y: number) {
 function terrainHeight(x: number, y: number, terrain: string) {
   const noise = Math.sin(x * 0.7) * 0.1 + Math.cos(y * 0.6) * 0.1;
   if (terrain === 'city') return MOUNTAIN_HEIGHT * 0.6 + noise;
+  if (terrain === 'hazard') return MOUNTAIN_HEIGHT * 0.45 + noise;
   if (terrain === 'forest') return FLAT_BASE_HEIGHT + 0.15 + noise;
   if (terrain === 'lake') return LAKE_DEPTH;
   return FLAT_BASE_HEIGHT + noise;
@@ -115,13 +116,14 @@ export default function Map3D({ zone, drones, baseX, baseY, showRtbOnly }: Props
           let metalness = 0.02;
           let roughness = 0.9;
           if (terrain === 'city') { color = scanned ? '#9aab90' : '#8a8a7a'; metalness = 0.18; roughness = 0.65; }
+          else if (terrain === 'hazard') { color = scanned ? '#a04a3a' : '#7a2e22'; metalness = 0.15; roughness = 0.75; }
           else if (terrain === 'forest') { color = scanned ? '#3a8050' : '#2a5c35'; }
           else if (terrain === 'lake') { color = '#1e4a7a'; metalness = 0.3; roughness = 0.15; }
           else { color = scanned ? '#55806a' : '#4b6b4f'; }
-          if (hazard && terrain !== 'lake') color = '#7c2f2f';
+          if (hazard && terrain !== 'lake' && terrain !== 'hazard') color = '#7c2f2f';
 
-          // Mini-building params for city cells
-          const hasBldg = terrain === 'city' && !hazard && (x * 3 + y * 7) % 5 !== 0;
+          // Mini-building params for city & hazard (damaged urban) cells
+          const hasBldg = (terrain === 'city' || terrain === 'hazard') && !hazard && (x * 3 + y * 7) % 5 !== 0;
           const bldgH = 0.12 + ((x * 13 + y * 7) % 5) * 0.07;
           const bldgW = 0.28 + ((x * 5 + y * 11) % 3) * 0.08;
 
@@ -145,11 +147,15 @@ export default function Map3D({ zone, drones, baseX, baseY, showRtbOnly }: Props
                 </mesh>
               )}
 
-              {/* City: small building on top */}
+              {/* City / hazard: small building on top (hazard = damaged red tint) */}
               {hasBldg && (
                 <mesh position={[wx + (((x * 7) % 3) - 1) * 0.18, h + bldgH / 2, wz + (((y * 5) % 3) - 1) * 0.18]} castShadow>
-                  <boxGeometry args={[bldgW, bldgH, bldgW]} />
-                  <meshStandardMaterial color={scanned ? '#b0b8a0' : '#9a9a88'} roughness={0.5} metalness={0.25} />
+                  <boxGeometry args={[bldgW, bldgH * (terrain === 'hazard' ? 0.6 : 1.0), bldgW]} />
+                  <meshStandardMaterial
+                    color={terrain === 'hazard' ? (scanned ? '#c26a52' : '#9e4031') : (scanned ? '#b0b8a0' : '#9a9a88')}
+                    roughness={0.5}
+                    metalness={0.25}
+                  />
                 </mesh>
               )}
 

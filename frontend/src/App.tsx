@@ -107,15 +107,31 @@ function StructuredLogText({ text }: { text: string }) {
   );
 }
 
+/** Classify an AI-log entry by its leading tag so we can colour-code
+ *  Commander / Pilot / fallback / voice-radio sub-agents distinctly. */
+function classifyAgent(text: string): { brain: string; label: string } {
+  const t = text.trimStart();
+  if (/^\[COMMANDER/i.test(t))          return { brain: 'commander',  label: '◆ COMMANDER' };
+  const pilotMatch = t.match(/^\[PILOT-([A-Z0-9-]+)\]/i);
+  if (pilotMatch)                       return { brain: 'pilot',      label: `▲ PILOT ${pilotMatch[1]}` };
+  if (/^\[SMART-FALLBACK\]|^\[AUTO\]/i.test(t)) return { brain: 'fallback', label: '■ RULE-BASED' };
+  if (/^\[VOICE/i.test(t) || /^\[RADIO/i.test(t) || t.startsWith('📻'))
+                                        return { brain: 'radio',      label: '◉ RADIO/VOICE' };
+  return { brain: 'generic', label: '⬡ SENTINEL AI' };
+}
+
 /** Single log entry card */
 function LogEntry({ entry }: { entry: any }) {
   const isAi = entry.level?.toLowerCase() === 'ai';
+  const agent = isAi ? classifyAgent(entry.text || "") : null;
+  const classes = ['log-entry', entry.level?.toLowerCase() ?? ''];
+  if (agent) classes.push(`brain-${agent.brain}`);
   return (
-    <div className={`log-entry ${entry.level?.toLowerCase() ?? ''}`}>
+    <div className={classes.join(' ')}>
       {isAi ? (
         <>
           <div className="ai-log-header">
-            <span className="ai-log-label">⬡ SENTINEL AI</span>
+            <span className="ai-log-label">{agent!.label}</span>
             <span className="log-ts">{entry.ts}</span>
           </div>
           <div className="ai-log-body">
@@ -654,6 +670,7 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
             <div className="legend">
               <>
                 <span className="legend-item"><div className="dot" style={{ background: '#8a8a7a' }}></div> CITY</span>
+                <span className="legend-item"><div className="dot" style={{ background: '#7a2e22' }}></div> HAZARD</span>
                 <span className="legend-item"><div className="dot" style={{ background: '#2a5c35' }}></div> FOREST</span>
                 <span className="legend-item"><div className="dot" style={{ background: '#355f8b' }}></div> LAKE</span>
                 <span className="legend-item"><div className="dot" style={{ background: 'rgba(55,145,80,0.68)', border: '1px solid rgba(0,220,200,0.45)' }}></div> SCANNED</span>
@@ -697,10 +714,11 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
 
                 let cellClass = "";
                 if (terrain === 'city') cellClass += " city-terrain";
+                else if (terrain === 'hazard') cellClass += " hazard-terrain";
                 else if (terrain === 'forest') cellClass += " forest-terrain";
                 else if (terrain === 'lake') cellClass += " lake";
-                // hazard only for non-lake cells (lakes are naturally impassable, not red)
-                if (hazard && terrain !== 'lake') cellClass += " hazard";
+                // impassability marker (lakes / future hazards). 'hazard' terrain already handled above.
+                if (hazard && terrain !== 'lake' && terrain !== 'hazard') cellClass += " hazard";
 
                 // Scanned applies on top of terrain — NOT mutually exclusive
                 const mobileUnfoundAtPos = !isVictimFound && !isVictimRescued && survivorAtPos?.is_mobile;
@@ -1372,6 +1390,38 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           white-space: pre-wrap;
           word-break: break-word;
         }
+        /* ── Sub-agent colour coding ── */
+        .log-entry.ai.brain-commander {
+          background: rgba(99, 102, 241, 0.08);
+          border-color: rgba(129, 140, 248, 0.28);
+          border-left-color: #818cf8;
+        }
+        .log-entry.ai.brain-commander .ai-log-label { color: #c7d2fe; }
+        .log-entry.ai.brain-commander .ai-log-body  { color: #e0e7ff; }
+
+        .log-entry.ai.brain-pilot {
+          background: rgba(251, 191, 36, 0.07);
+          border-color: rgba(251, 191, 36, 0.30);
+          border-left-color: #fbbf24;
+        }
+        .log-entry.ai.brain-pilot .ai-log-label { color: #fde68a; }
+        .log-entry.ai.brain-pilot .ai-log-body  { color: #fef3c7; }
+
+        .log-entry.ai.brain-fallback {
+          background: rgba(74, 222, 128, 0.06);
+          border-color: rgba(74, 222, 128, 0.28);
+          border-left-color: #4ade80;
+        }
+        .log-entry.ai.brain-fallback .ai-log-label { color: #86efac; }
+        .log-entry.ai.brain-fallback .ai-log-body  { color: #dcfce7; }
+
+        .log-entry.ai.brain-radio {
+          background: rgba(167, 139, 250, 0.07);
+          border-color: rgba(167, 139, 250, 0.30);
+          border-left-color: #a78bfa;
+        }
+        .log-entry.ai.brain-radio .ai-log-label { color: #ddd6fe; }
+        .log-entry.ai.brain-radio .ai-log-body  { color: #ede9fe; }
         .log-entry.warn { color: #ffb300; opacity: 0.9; }
         .log-entry.error { color: #ff3d3d; font-weight: bold; background: rgba(255, 61, 61, 0.1); padding: 2px 4px; }
         .log-entry.success { color: #00ff88; text-shadow: 0 0 5px rgba(0, 255, 136, 0.3); }
@@ -1494,12 +1544,16 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           border-color: rgba(0, 220, 200, 0.45) !important;
         }
         /* Flat scanned: cyan wash */
-        .grid-cell.scanned:not(.city-terrain):not(.forest-terrain):not(.lake) {
+        .grid-cell.scanned:not(.city-terrain):not(.hazard-terrain):not(.forest-terrain):not(.lake) {
           background: rgba(0, 180, 160, 0.28);
         }
         /* City scanned: bleached concrete — much lighter than unscanned grey */
         .grid-cell.city-terrain.scanned {
           background: rgba(195, 200, 178, 0.65) !important;
+        }
+        /* Hazard scanned: lighter damaged-urban red */
+        .grid-cell.hazard-terrain.scanned {
+          background: rgba(180, 85, 72, 0.72) !important;
         }
         /* Forest scanned: bright canopy green — clearly lighter than deep forest */
         .grid-cell.forest-terrain.scanned {
@@ -1569,6 +1623,24 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
             transparent 3px,
             rgba(200,200,180,0.08) 3px,
             rgba(200,200,180,0.08) 4px
+          );
+          pointer-events: none;
+        }
+        /* Hazard: damaged urban block inside the city — darker red with cracked-wall hatching */
+        .grid-cell.hazard-terrain {
+          background: rgba(122, 46, 34, 0.72);
+          border-color: rgba(220, 80, 60, 0.55);
+          box-shadow: inset 0 0 6px rgba(255, 80, 60, 0.25);
+        }
+        .grid-cell.hazard-terrain::after {
+          content: '';
+          position: absolute; inset: 1px;
+          background: repeating-linear-gradient(
+            135deg,
+            transparent 0px,
+            transparent 3px,
+            rgba(255, 140, 120, 0.18) 3px,
+            rgba(255, 140, 120, 0.18) 4px
           );
           pointer-events: none;
         }

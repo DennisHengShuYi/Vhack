@@ -98,3 +98,12 @@ Auto-detects provider from env: `OPENAI_API_KEY` → GPT-4o, `GEMINI_API_KEY` �
 
 - Grid: 10×10 | Zones: 5×5 each | Tick: 0.7s | Battery RTB threshold: 25%
 - Requires `.env` at project root with `OPENAI_API_KEY`
+
+## Known pitfalls
+
+Before modifying the search/scan strategy, read
+[docs/search-strategy-regressions.md](docs/search-strategy-regressions.md) —
+post-mortem of changes that broke coverage of city/hazard zones and must not be
+reintroduced (notably: opportunistic scan must stay restricted to the drone's
+assigned zone, probability_map scale changes require coordinated downstream
+retuning, and `get_status` must enrich zones with `score` / `terrain_counts`).

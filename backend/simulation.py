@@ -18,7 +18,7 @@ BATTERY_DRAIN_MOVE   = 1.0    # % per cell moved
 BATTERY_DRAIN_SCAN   = 1.0    # % per thermal scan
 LOW_BATTERY_THRESHOLD = 25.0  # % — recall threshold
 BATTERY_RETURN_RESERVE = 8.0  # % — emergency reserve after reaching base
-TERRAIN_SCAN_WEIGHT: Dict[str, int] = {'city': 5, 'forest': 2, 'flat': 1}
+TERRAIN_SCAN_WEIGHT: Dict[str, int] = {'hazard': 7, 'city': 5, 'forest': 2, 'flat': 1}
 NUM_DRONES           = 5
 
 # ─── Victim Condition Constants ────────────────────────────────────────────────
@@ -299,6 +299,42 @@ class DisasterZone(BaseModel):
                     for gx in range(ax, min(ax + arm_w, self.width - 1)):
                         self.terrain_types[gy][gx] = 'city'
 
+            # ── 1b. Hazard: one small BFS blob grown strictly inside city cells ──
+            # Hazard cells are a *label*, not an impassability marker — drones can
+            # still traverse them. The higher scan weight (7 vs city 5) makes them
+            # the top survivor-probability tier.
+            city_cells = [
+                (x, y)
+                for y in range(1, self.height - 1)
+                for x in range(1, self.width - 1)
+                if self.terrain_types[y][x] == 'city'
+            ]
+            if city_cells:
+                seed = random.choice(city_cells)
+                self.terrain_types[seed[1]][seed[0]] = 'hazard'
+                frontier = [seed]
+                target = random.randint(5, 10)
+                count = 1
+                dirs_h = [(0,1),(0,-1),(1,0),(-1,0),(1,1),(1,-1),(-1,1),(-1,-1)]
+                while count < target and frontier:
+                    idx = random.randint(0, len(frontier) - 1)
+                    ox, oy = frontier[idx]
+                    random.shuffle(dirs_h)
+                    grew = False
+                    for dx, dy in dirs_h:
+                        nx2, ny2 = ox + dx, oy + dy
+                        if (0 <= nx2 < self.width and 0 <= ny2 < self.height
+                                and self.terrain_types[ny2][nx2] == 'city'):
+                            self.terrain_types[ny2][nx2] = 'hazard'
+                            frontier.append((nx2, ny2))
+                            count += 1
+                            grew = True
+                            if count >= target:
+                                break
+                            break
+                    if not grew:
+                        frontier.pop(idx)
+
             # ── 2. Forest: 1–2 large contiguous woodland patches (BFS-grown) ──
             for _ in range(random.randint(1, 2)):
                 fsize = random.randint(25, 35)
@@ -354,7 +390,7 @@ class DisasterZone(BaseModel):
                 "SOS signal — weak thermal signature",
                 "Survivor with broken leg near wall",
             ]
-            TERRAIN_WEIGHTS = {'city': 5, 'forest': 2, 'flat': 1, 'lake': 0}
+            TERRAIN_WEIGHTS = {'hazard': 7, 'city': 5, 'forest': 2, 'flat': 1, 'lake': 0}
 
             # Build candidate pool weighted by terrain
             pool = []
@@ -704,7 +740,7 @@ class SimulationState:
         Groups cells into terrain tiers (city > forest > flat), then within
         each tier uses spatial clustering to minimize backtracking.
         All accessible, unscanned cells are included — full coverage guaranteed."""
-        cells_by_tier: Dict[int, List[tuple]] = {5: [], 2: [], 1: []}
+        cells_by_tier: Dict[int, List[tuple]] = {7: [], 5: [], 2: [], 1: []}
 
         for y in range(zone.sy, zone.ey + 1):
             for x in range(zone.sx, zone.ex + 1):
@@ -713,13 +749,13 @@ class SimulationState:
                 if self.zone.scanned_cells[y][x]:
                     continue
                 weight = TERRAIN_SCAN_WEIGHT.get(self.zone.terrain_types[y][x], 1)
-                cells_by_tier[weight].append((x, y))
+                cells_by_tier.setdefault(weight, []).append((x, y))
 
         # Within each tier, sort by proximity to minimize backtracking
         # Use nearest-neighbor greedy ordering
         ordered: List[tuple] = []
         cx, cy = start_x, start_y
-        for tier in (5, 2, 1):  # city first, then forest, then flat
+        for tier in (7, 5, 2, 1):  # hazard, city, forest, flat
             remaining = list(cells_by_tier[tier])
             while remaining:
                 best_idx = 0
@@ -1237,7 +1273,7 @@ class SimulationState:
                             and not self.zone.scanned_cells[ny][nx]
                             and not self.is_inaccessible(nx, ny)
                             and (nx, ny) not in path_set
-                            and self.zone.terrain_types[ny][nx] in ('city', 'forest')):
+                            and self.zone.terrain_types[ny][nx] in ('hazard', 'city', 'forest')):
                         candidates.append((nx, ny))
 
         if not candidates:

@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react';
-import { Radio, Mic, MicOff, RotateCcw } from 'lucide-react';
+import { Radio, Mic, MicOff, RotateCcw, Send } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
 
@@ -35,7 +35,26 @@ export default function RadioPanel({ leads }: Props) {
   const [lang, setLang] = useState('en-MY');
   const [isRecording, setIsRecording] = useState(false);
   const [status, setStatus] = useState('');
+  const [textInput, setTextInput] = useState('');
+  const [isSending, setIsSending] = useState(false);
   const recognitionRef = useRef<any>(null);
+
+  const sendText = async () => {
+    const trimmed = textInput.trim();
+    if (!trimmed || isSending) return;
+    setIsSending(true);
+    setStatus(`Sending: "${trimmed}"`);
+    try {
+      const params = new URLSearchParams({ lang: lang.split('-')[0].toUpperCase(), text: trimmed });
+      await fetch(`${API_BASE}/radio-intel?${params}`, { method: 'POST' });
+      setStatus('Intel submitted.');
+      setTextInput('');
+    } catch {
+      setStatus('Send failed.');
+    } finally {
+      setIsSending(false);
+    }
+  };
 
   const startRecording = () => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -103,6 +122,32 @@ export default function RadioPanel({ leads }: Props) {
         {isRecording ? <MicOff size={14} /> : <Mic size={14} />}
         {isRecording ? 'STOP' : 'PUSH TO TALK'}
       </button>
+
+      {/* Text-entry intel */}
+      <div style={{ display: 'flex', gap: 4 }}>
+        <input
+          type="text"
+          value={textInput}
+          onChange={(e) => setTextInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') sendText(); }}
+          placeholder="e.g. victim trapped in forest area"
+          disabled={isSending}
+          style={{
+            flex: 1, fontSize: 11, padding: '4px 8px',
+            background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(0,243,255,0.25)',
+            borderRadius: 3, color: '#e5e7eb', outline: 'none',
+          }}
+        />
+        <button
+          className="cyber-button primary"
+          style={{ padding: '4px 8px', minWidth: 32, justifyContent: 'center' }}
+          onClick={sendText}
+          disabled={isSending || !textInput.trim()}
+          title="Send intel"
+        >
+          <Send size={12} />
+        </button>
+      </div>
       {status && <div style={{ fontSize: 10, color: '#9ca3af', textAlign: 'center' }}>{status}</div>}
 
       {/* Transcript feed */}

@@ -62,11 +62,12 @@ Your job: assess the full fleet state and set priorities that all Pilot agents w
 
 Output EXACTLY this format (all four lines required):
 POSTURE: <SPREAD|CONVERGE|LEAD_CHASE|RTB_CAUTIOUS>
-PRIORITY: <Z0=X.X, Z1=X.X, Z2=X.X, ...>  (list every zone; city zones get 7-10, forest 4-6, flat 1-3)
+PRIORITY: <Z0=X.X, Z1=X.X, Z2=X.X, ...>  (list every zone; hazard-bearing zones get 9-10, city zones 7-9, forest 4-6, flat 1-3)
 REDIRECT: (<x>, <y>): <reason>  (omit this line entirely if no urgent redirect)
 BRIEF: <1-2 sentences on current mission state and what Pilots should focus on>
 
 Rules:
+- Hazard cells (damaged urban zones within city) ALWAYS get the highest weight — they have 7× survivor probability of flat terrain
 - City terrain zones ALWAYS get higher weight than flat zones regardless of distance
 - LEAD_CHASE posture when a GROUNDED CRITICAL lead exists
 - CONVERGE when coverage > 50% — focus on highest remaining scores
@@ -226,7 +227,7 @@ DECISION → RTB: battery critical
 Rules:
 - DECISION and BACKUP must be different zones
 - Higher priority score = more likely survivors — always prefer it
-- City terrain zones have highest survivor probability
+- Hazard-bearing zones (damaged urban sectors) outrank everything; city zones outrank forest and flat
 - Follow the stated posture
 - Never pick a zone not listed in Available zones
 """
