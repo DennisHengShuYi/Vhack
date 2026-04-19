@@ -26,12 +26,14 @@ class ContractChecker:
         self.idle_since: dict[str, int] = {}
         self.zone_unassigned_since: dict[str, int] = {}
         self.row_gap_since: dict[int, int] = {}
+        self.lead_unaddressed_since: dict[str, int] = {}
 
     def reset(self) -> None:
         """Clear counters — call on MISSION START."""
         self.idle_since = {}
         self.zone_unassigned_since = {}
         self.row_gap_since = {}
+        self.lead_unaddressed_since = {}
 
     def check(self, state: dict, tick: int) -> list[str]:
         """
@@ -45,6 +47,7 @@ class ContractChecker:
         alerts.extend(self._idle_drones(state, tick))
         alerts.extend(self._high_score_zones(state, tick))
         alerts.extend(self._row_gaps(state, tick))
+        alerts.extend(self._unaddressed_leads(state, tick))
         return alerts
 
     def _coverage_pace(self, state: dict, tick: int) -> list[str]:
@@ -105,6 +108,31 @@ class ContractChecker:
                 self.zone_unassigned_since.pop(zid, None)
         for gone in set(self.zone_unassigned_since) - active_ids:
             del self.zone_unassigned_since[gone]
+        return alerts
+
+    LEAD_UNADDRESSED_THRESHOLD = 10
+
+    def _unaddressed_leads(self, state: dict, tick: int) -> list[str]:
+        alerts: list[str] = []
+        active_ids: set[str] = set()
+        for lead in state.get("leads", []):
+            lid = lead.get("id", "")
+            if lead.get("status") not in ("GROUNDED", "PENDING_GROUND"):
+                self.lead_unaddressed_since.pop(lid, None)
+                continue
+            if lead.get("urgency") != "CRITICAL":
+                continue
+            active_ids.add(lid)
+            self.lead_unaddressed_since.setdefault(lid, tick)
+            age = tick - self.lead_unaddressed_since[lid]
+            if age >= self.LEAD_UNADDRESSED_THRESHOLD:
+                x, y = lead.get("x", "?"), lead.get("y", "?")
+                alerts.append(
+                    f"⚠ CONTRACT: CRITICAL lead [{lid}] at ({x},{y}) unaddressed"
+                    f" {age} ticks — dispatch investigate_lead immediately"
+                )
+        for gone in set(self.lead_unaddressed_since) - active_ids:
+            del self.lead_unaddressed_since[gone]
         return alerts
 
     def _row_gaps(self, state: dict, tick: int) -> list[str]:

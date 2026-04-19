@@ -78,6 +78,23 @@ class ToolHooks:
 
         return (drone_id, zone_id)
 
+    def pre_investigate_lead(
+        self, drone_id: str, x: int, y: int, state: dict
+    ) -> bool:
+        """Returns True to proceed, False to block (drone RTBs instead)."""
+        drones_by_id = {d["id"]: d for d in state.get("drones", [])}
+        drone = drones_by_id.get(drone_id)
+        if drone is not None:
+            battery = drone.get("battery", 100.0)
+            if battery < MIN_BATTERY_TO_ASSIGN:
+                print(
+                    f"  [HOOK] pre_investigate_lead blocked: {drone_id} battery {battery:.1f}%"
+                    f" < {MIN_BATTERY_TO_ASSIGN}% — converting to RTB",
+                    file=sys.stderr,
+                )
+                return False
+        return True
+
     # ── Post-hooks ────────────────────────────────────────────────────────────
 
     def post_assign(

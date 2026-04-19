@@ -39,6 +39,11 @@ class MissionMemory:
         # Tier 0
         if "survivor" in low and ("found" in low or "detected" in low):
             return (0, f"Tick {tick}: Survivor detected — {content[:100].strip()}")
+        # Tier 0 — CRITICAL radio leads
+        if "grounded" in low and "critical" in low:
+            return (0, f"Tick {tick}: CRITICAL lead grounded — {content[:80].strip()}")
+        if "lead resolved" in low and "survivor" in low:
+            return (0, f"Tick {tick}: Lead → Survivor confirmed — {content[:80].strip()}")
         if "critical" in low:
             return (0, f"Tick {tick}: CRITICAL — {content[:80].strip()}")
         if "offline" in low or "failure" in low:
@@ -62,6 +67,10 @@ class MissionMemory:
             return (2, f"Tick {tick}: {d.group(0) if d else 'drone'}→{z.group(0) if z else 'zone'}")
         if "anomaly" in low or "thermal" in low:
             return (2, f"Tick {tick}: Thermal — {content[:60].strip()}")
+        # Tier 1 — investigation dispatches
+        if "investigate_lead" in low or "investigating lead" in low:
+            d = re.search(r'ALPHA-\d+', content)
+            return (1, f"Tick {tick}: {d.group(0) if d else 'drone'} investigating lead")
         return None
 
     def _append(self, tier: int, text: str) -> None:
