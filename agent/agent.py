@@ -84,16 +84,32 @@ Within a single planning block, EVERY drone MUST have a DIFFERENT DECISION zone.
 - If a conflict exists, change the later drone to its next-best option BEFORE calling any tools.
 - This prevents "zone already IN_PROGRESS" errors and wasted LLM round-trips.
 
-=== STRATEGIC RULES ===
-- Never leave an idle drone without an assignment.
-- Never assign a zone already listed as IN_PROGRESS — another drone is scanning it.
-- OPTIONS ARE SORTED BY SCORE FIRST: Opt 1 always has the highest expected survivor score. ALWAYS prefer Opt 1 unless it conflicts with ZONE UNIQUENESS.
-- High-score zones (Score > 1.5) MUST be assigned before low-score zones regardless of transit cost, unless the transit difference exceeds 12 cells.
-- [GAP-ROW] tag means no drone currently covers that row — when two zones have scores within 0.3 of each other, prefer the gap-row zone for better spatial coverage. Never skip a high-score zone to fill a gap row.
-- SPATIAL SPREAD: In any planning batch, no two drones should be assigned to adjacent zones. Prefer zones in different rows (Row 0: Z0-Z3, Row 1: Z4-Z7, Row 2: Z8-Z11).
-- Prefer [PARTIAL-resume] zones — they have saved scan progress and will complete faster.
-- All 5 drones are equal — ALPHA-5 is assigned the next best available zone exactly like ALPHA-1–4. No special assist role.
-- If all zones are claimed or no valid option, send idle drones to return_to_base().
+=== THREE-LAYER DECISION MODEL ===
+
+SAFETY (rules enforce — you cannot override):
+- Battery-infeasible options are filtered before you see them. Hooks auto-RTB any drone battery < 35%.
+- Hooks block zone assignments already IN_PROGRESS.
+
+TACTICS (your core job every tick):
+- The options menu is UNSORTED — Opt 1 is NOT always best.
+- Weigh: zone_score (Bayesian survivor probability), terrain (City > Forest > Flat),
+  [GAP-ROW] (spread coverage), [LEAD-NEARBY] (radio intel nearby, +2.0 priority),
+  [FIND-NEARBY] (cluster search, +1.5 priority), [PARTIAL-resume] (resume partial scan),
+  transit cost, battery headroom.
+- ZONE UNIQUENESS: within one batch no two drones share a zone_id. Check all DECISION lines before calling tools.
+- Never leave an idle drone without an assignment or RTB.
+
+STRATEGY (refresh every ~30 ticks or on major event):
+- Call set_strategic_brief(posture, priority_zones, notes) to declare your posture:
+    SPREAD — early mission, maximise grid row coverage
+    CONVERGE — 50%+ coverage, focus on high-score zones
+    LEAD_CHASE — radio lead received, send nearest drone
+    RTB_CAUTIOUS — fleet avg battery < 40%, preserve capacity
+
+LEADS (radio field intel):
+- Call get_pending_leads() each decision cycle.
+- For GROUNDED CRITICAL leads: call investigate_lead(drone_id, x, y, reason) when a drone can reach in < 5 transit cells.
+- [LEAD-NEARBY] tag on a zone option means that zone is within 3 cells of a pending lead — prefer it.
 
 Write your Mission Log clearly so the human observer can follow your logic, then execute all assignments.
 
@@ -270,17 +286,44 @@ class AgentOrchestrator:
                     )
                     msg = result.content[0].text if result.content else "done"
                     await self._broadcast_log(http_session, f"[RTB] {msg}")
+                elif action[0] == "investigate":
+                    drone_id, x, y, reason = action[1], action[2], action[3], action[4]
+                    if not self.hooks.pre_investigate_lead(drone_id, x, y, _state):
+                        result = await session.call_tool("return_to_base", {"drone_id": drone_id})
+                        msg = result.content[0].text if result.content else "done"
+                        await self._broadcast_log(http_session, f"[HOOK-RTB] {msg}")
+                        return
+                    result = await session.call_tool(
+                        "investigate_lead",
+                        {"drone_id": drone_id, "x": x, "y": y, "reason": reason}
+                    )
+                    msg = result.content[0].text if result.content else "done"
+                    await self._broadcast_log(http_session, f"[LEAD] {msg}")
+                    self.memory._append(1, f"Tick {tick}: {drone_id} → investigate ({x},{y})")
+                    await self._emit_timeline(
+                        http_session,
+                        kind="LEAD_INVESTIGATE",
+                        payload={"drone_id": drone_id, "x": x, "y": y, "reason": reason},
+                        tick=tick,
+                    )
             except Exception as e:
                 print(f"  [PARALLEL ERROR] {e}", file=sys.stderr)
 
         await asyncio.gather(*[_call(a) for a in actions])
 
-    def _is_trivial(self, poll_text: str) -> bool:
-        """Returns True if every idle drone has exactly 1 valid option or must RTB — no tradeoff."""
+    def _must_skip_llm(self, poll_text: str, state: dict) -> bool:
+        """Skip LLM only when there is genuinely no tradeoff to reason about."""
         drones_mentioned = poll_text.count("[DRONE:")
+        opt2_present = "Opt 2:" in poll_text
+        has_pending_leads = any(
+            l.get("status") in ("GROUNDED", "PENDING_GROUND")
+            for l in state.get("leads", [])
+        )
+        if opt2_present or has_pending_leads:
+            return False
         opt1_count = poll_text.count("Opt 1:")
         rtb_count = poll_text.count("Battery too low for any zone")
-        return (opt1_count + rtb_count) == drones_mentioned and "Opt 2:" not in poll_text
+        return (opt1_count + rtb_count) == drones_mentioned
 
     async def _recall_all_drones(self, session: ClientSession, http_session: aiohttp.ClientSession):
         """Sends all active drones back to base at mission end."""
@@ -410,7 +453,7 @@ class AgentOrchestrator:
                             pass
 
                         # ── PHASE 2: EXECUTE (LLM or rule-based) ────────────
-                        is_trivial = self._is_trivial(poll_text)
+                        is_trivial = self._must_skip_llm(poll_text, _state_for_contracts)
 
                         if self.llm_active and agent_executor is not None and not is_trivial:
                             # Build memory block for injection
@@ -428,6 +471,8 @@ class AgentOrchestrator:
                                 HumanMessage(content=f"{historical_block}{memory_block}Execute assignments for these idle drones:\n\n{poll_text}")
                             ]
                             try:
+                                import time as _time
+                                _llm_start = _time.monotonic()
                                 async for state in agent_executor.astream(
                                     {"messages": messages},
                                     config={"callbacks": [token_handler]},
@@ -453,6 +498,15 @@ class AgentOrchestrator:
 
                                 # Extract and store memory events from this tick
                                 self.memory.extract(messages, tick)
+
+                                _llm_ms = (_time.monotonic() - _llm_start) * 1000
+                                try:
+                                    await http_session.post(
+                                        f"{self.backend_url}/metrics/planning-latency",
+                                        params={"ms": _llm_ms}
+                                    )
+                                except Exception:
+                                    pass
 
                                 await self._emit_timeline(
                                     http_session,

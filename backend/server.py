@@ -234,6 +234,8 @@ async def run_simulation_loop():
                         else:
                             # Standard autonomous scan logic
                             result = sim.scan(d_id)
+                            if sim.metrics.first_find_tick is None and sim.total_victims_found > 0:
+                                sim.metrics.record_first_find(sim.tick_count)
                             if "THERMAL MATCH" not in result and "VICTIM_DETECTED" not in result:
                                 drone.target_x = None
 
@@ -724,6 +726,12 @@ async def post_timeline(
     if len(sim.timeline) > sim._timeline_cap:
         sim.timeline = sim.timeline[-sim._timeline_cap:]
     return {"status": "ok", "id": ev.id}
+
+
+@app.post("/metrics/planning-latency")
+async def record_planning_latency(ms: float):
+    shared.sim.metrics.record_planning_latency(ms)
+    return {"status": "ok"}
 
 
 @app.post("/radio-intel")
