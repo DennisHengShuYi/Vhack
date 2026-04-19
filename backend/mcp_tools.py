@@ -331,6 +331,20 @@ def register_tools(mcp):
                 zone_row = z_obj.sy // row_size
                 row_gap = zone_row not in active_rows  # True = this row has no active drone
 
+                # Check if zone centre is within 3 cells of a pending GROUNDED lead
+                zone_cx = (z_obj.sx + z_obj.ex) // 2
+                zone_cy = (z_obj.sy + z_obj.ey) // 2
+                adj_lead = any(
+                    chebyshev(zone_cx, zone_cy, l.x, l.y) <= 3
+                    for l in getattr(sim, 'leads', [])
+                    if l.status in ("GROUNDED", "PENDING_GROUND") and l.x is not None
+                )
+                adj_finds = any(
+                    chebyshev(zone_cx, zone_cy, s["x"], s["y"]) <= 3
+                    for s in sim.zone.survivors
+                    if s.get("found") and not s.get("rescued")
+                )
+
                 options.append({
                     "zone_id": z["zone_id"],
                     "transit": transit,
@@ -342,17 +356,15 @@ def register_tools(mcp):
                     "scan_pct": scan_pct,
                     "zone_row": zone_row,
                     "row_gap": row_gap,
+                    "adjacent_to_lead": adj_lead,
+                    "adjacent_to_finds": adj_finds,
                 })
 
-            options.sort(key=lambda x: (
-                # 1st: highest probability score first
-                -x["zone_score"],
-                # 2nd: gap rows as tiebreaker within similar scores
-                0 if x["row_gap"] else 1,
-                # 3rd: nearest first
-                x["transit"]
-            ))
-            valid_options = [o for o in options if o["total"] + BATTERY_RETURN_RESERVE <= drone.battery][:3]
+            valid_options = [
+                o for o in options
+                if o["total"] + BATTERY_RETURN_RESERVE <= drone.battery
+            ][:6]
+            # No pre-sorting — agent decides which factor matters most
 
             if not valid_options:
                 report.append("  * REC: return_to_base() | Battery too low for any zone.")
@@ -363,10 +375,12 @@ def register_tools(mcp):
                     has_residual = bool(sim.zone.zones[opt['zone_id']].residual_path)
                     partial = " [PARTIAL-resume]" if has_residual else ""
                     gap_tag = " [GAP-ROW: no drone in this sector]" if opt["row_gap"] else ""
+                    lead_tag = " [LEAD-NEARBY]" if opt["adjacent_to_lead"] else ""
+                    find_tag = " [FIND-NEARBY]" if opt["adjacent_to_finds"] else ""
                     report.append(
                         f"  Opt {i+1}: assign_scan_zone(\"{d_id}\", \"{opt['zone_id']}\") "
                         f"- Score={opt['zone_score']:.2f}, Transit={opt['transit']}, Cost={opt['total']}, "
-                        f"Risk={risk}, Terrain=[{opt['terrain']}], Scanned={opt['scan_pct']}%{partial}{gap_tag}"
+                        f"Risk={risk}, Terrain=[{opt['terrain']}], Scanned={opt['scan_pct']}%{partial}{gap_tag}{lead_tag}{find_tag}"
                     )
 
         return "\n".join(report)
