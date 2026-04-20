@@ -46,11 +46,11 @@ h1, h2, h3, .font-mono {
   background: transparent;
   border: 1px solid var(--accent-cyan);
   color: var(--accent-cyan);
-  padding: 10px 20px;
+  padding: 6px 14px;
   border-radius: 4px;
   cursor: pointer;
   font-family: 'Orbitron', sans-serif;
-  font-size: 0.8rem;
+  font-size: 0.75rem;
   transition: all 0.3s ease;
   text-transform: uppercase;
   position: relative;
@@ -275,3 +275,33 @@ h1, h2, h3, .font-mono {
 .slog-system.complete { color: var(--accent-success);  background: rgba(0,255,136,0.1); font-weight: 700; }
 .slog-system.warn     { color: var(--accent-red);     background: rgba(255,61,61,0.07); }
 .slog-system.dispatch { color: var(--accent-cyan);    background: rgba(0,243,255,0.07); }
+
+/* ── Metrics Panel ─────────────────────────────────────── */
+.metrics-panel { padding: 12px; }
+.metric-card {
+  background: #0f1f0f;
+  border: 1px solid #1e3a1e;
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+.metric-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}
+.metric-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: #e5e7eb;
+}
+.metric-sub {
+  font-size: 11px;
+  color: #6b7280;
+  margin-top: 2px;
+}
+.drone-card .metric-value { font-size: 13px; }

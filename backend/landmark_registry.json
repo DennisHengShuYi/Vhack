@@ -1,0 +1,14 @@
+[
+  {"name": "mosque",       "aliases": ["masjid", "surau"],           "x": 3,  "y": 2},
+  {"name": "school",       "aliases": ["sekolah", "eskwelahan"],     "x": 7,  "y": 1},
+  {"name": "clinic",       "aliases": ["klinik", "hospital kecil"],  "x": 12, "y": 3},
+  {"name": "bridge",       "aliases": ["jambatan", "tulay"],         "x": 5,  "y": 7},
+  {"name": "river bend",   "aliases": ["sungai", "ilog"],            "x": 9,  "y": 9},
+  {"name": "market",       "aliases": ["pasar", "palengke"],         "x": 14, "y": 5},
+  {"name": "petrol station", "aliases": ["stesen minyak", "gasolinahan"], "x": 17, "y": 2},
+  {"name": "community hall", "aliases": ["dewan", "barangay hall"],  "x": 6,  "y": 11},
+  {"name": "water tower",  "aliases": ["menara air", "tore ng tubig"], "x": 11, "y": 13},
+  {"name": "highway junction", "aliases": ["simpang", "kalsada"],   "x": 16, "y": 8},
+  {"name": "sports field", "aliases": ["padang", "larangan"],       "x": 2,  "y": 12},
+  {"name": "factory",      "aliases": ["kilang", "pabrika"],         "x": 18, "y": 11}
+]

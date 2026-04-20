@@ -81,3 +81,6 @@ desktop.ini
 *.pdf
 *.tmp
 *.bak
+
+# Git worktrees
+.worktrees/

@@ -24,6 +24,7 @@ import time
 import threading
 from contextlib import asynccontextmanager
 from typing import Optional, Any
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -98,10 +99,34 @@ async def run_simulation_loop():
                         drone.status_label = "RTB — COMPLETE"
                 sim.mission_active = False
                 sim.mission_end_time = time.time()
+                try:
+                    try:
+                        from backend.mission_flusher import flush_mission
+                        from backend.supabase_client import get_client
+                    except ModuleNotFoundError:
+                        from mission_flusher import flush_mission
+                        from supabase_client import get_client
+                    _sb = get_client()
+                    threading.Thread(
+                        target=flush_mission, args=(sim, _sb), daemon=False
+                    ).start()
+                except EnvironmentError:
+                    print("[FLUSH] Supabase env vars not set — skipping flush.", file=sys.stderr)
 
             # Heartbeat check — brings drones online in staggered order
             sim.tick_count += 1
             sim.simulate_heartbeats()
+
+            if sim.mission_active:
+                recent_events = [
+                    e["text"] for e in sim.mission_log[-10:]
+                    if e.get("level") in ("VICTIM_FOUND", "SUCCESS", "WARN")
+                ]
+                sim.append_replay_snapshot(events=recent_events)
+
+            # Survivor mobility: move mobile survivors every 5 ticks
+            if sim.tick_count % 5 == 0:
+                sim.simulate_survivor_movement()
 
             # Loop A: advance each drone one step
             if sim.mission_active:
@@ -119,27 +144,45 @@ async def run_simulation_loop():
                         drone.status_label = "VICTIM STANDBY"
                         continue
 
-                    # Auto-charge at base
+                    # Auto-charge at base (adaptive — charge only to minimum needed)
                     if (drone.x, drone.y) == (base_x, base_y) and drone.battery < 100 and (
                         drone.returning_to_base or drone.is_charging or drone.battery < LOW_BATTERY_THRESHOLD
                     ):
+                        charge_target = sim.smart_charge_target(d_id)
                         if not drone.is_charging:
-                            sim.log(f"🤖 {d_id} arrived at base. Commencing recharge.", "INFO", d_id)
+                            sim.log(f"🤖 {d_id} arrived at base. Charging to {charge_target:.0f}%.", "INFO", d_id)
                         sim.charge_step(d_id)
-                        if not drone.is_charging:
-                            # Charging just completed — clear RTB flag and wait for agent assignment
+                        # Stop charging early if we've reached the smart target
+                        if drone.battery >= charge_target and drone.is_charging:
+                            drone.is_charging = False
+                            drone.charge_cycles += 1
+                            drone.status = "IDLE"
+                            drone.status_label = "READY"
+                            drone.target_x = None
+                            drone.target_y = None
                             drone.returning_to_base = False
-                        continue  # Always skip movement logic while at base charging/post-charge
+                            drone.voice_override = False
+                            sim.log(f"[BATTERY] {d_id} smart-charged to {drone.battery:.0f}%. Ready.", "CHARGE", d_id)
+                        if not drone.is_charging:
+                            drone.returning_to_base = False
+                        continue
 
                     # No target and empty path — zone complete; check pending residual then go idle
                     if drone.target_x is None and not drone.path_queue:
                         # Zone completion bookkeeping
                         if drone.assigned_zone_id:
                             zid = drone.assigned_zone_id
-                            if zid in sim.zone.zones:
-                                sim.zone.zones[zid].status = ZoneStatus.COMPLETE
-                                sim.log(f"✅ Zone {zid} search complete.", "SUCCESS", d_id)
                             drone.assigned_zone_id = None
+                            # Only mark COMPLETE if no other drone is still scanning this zone
+                            other_scanning = any(
+                                d.assigned_zone_id == zid
+                                for did2, d in sim.drones.items()
+                                if did2 != d_id
+                            )
+                            if not other_scanning and zid in sim.zone.zones:
+                                sim.zone.zones[zid].status = ZoneStatus.COMPLETE
+                                sim.zone.zones[zid].completed_tick = sim.tick_count
+                                sim.log(f"✅ Zone {zid} search complete.", "SUCCESS", d_id)
 
                         # RESIDUAL HANDOFF: if this drone was reserved to cover a residual zone, go there now
                         if drone.pending_zone_id and not drone.returning_to_base:
@@ -191,6 +234,8 @@ async def run_simulation_loop():
                         else:
                             # Standard autonomous scan logic
                             result = sim.scan(d_id)
+                            if sim.metrics.first_find_tick is None and sim.total_victims_found > 0:
+                                sim.metrics.record_first_find(sim.tick_count)
                             if "THERMAL MATCH" not in result and "VICTIM_DETECTED" not in result:
                                 drone.target_x = None
 
@@ -227,6 +272,7 @@ async def run_simulation_loop():
                     terrain_at = sim.zone.terrain_types[ny][nx]
                     drain = 1.5 if terrain_at == 'forest' else 1.0
                     drone.battery = max(0.0, drone.battery - drain)
+                    sim.metrics.battery_consumed_total += drain
                     drone.status = "ON_MISSION"
                     drone.status_label = f"→({tx},{ty})"
 
@@ -270,7 +316,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="RescueSwarm API",
-    description="First Responder Swarm Intelligence — MCP + FastAPI",
+    description="AI Drone Search & Rescue Simulation — MCP + FastAPI",
     version="2.0.0",
     lifespan=lifespan,
 )
@@ -281,6 +327,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+from history import router as history_router
+app.include_router(history_router)
 
 
 @app.get("/state")
@@ -308,6 +358,19 @@ async def stop_mission():
     sim.mission_active = False
     sim.mission_end_time = time.time()
     sim.log("🛑 MISSION HALTED by operator command.", "WARN")
+    try:
+        try:
+            from backend.mission_flusher import flush_mission
+            from backend.supabase_client import get_client
+        except ModuleNotFoundError:
+            from mission_flusher import flush_mission
+            from supabase_client import get_client
+        _sb = get_client()
+        threading.Thread(
+            target=flush_mission, args=(sim, _sb), daemon=True
+        ).start()
+    except EnvironmentError:
+        print("[FLUSH] Supabase env vars not set — skipping flush.", file=sys.stderr)
     return {"status": "Mission stopped"}
 
 
@@ -636,87 +699,135 @@ async def guide_victim(drone_id: str):
     return {"status": "ok", "result": result}
 
 
-@app.post("/voice-command")
-async def voice_command(message: str):
-    """
-    Global voice command — returns immediately, processes in background.
-    LLM extracts target coordinates, nearest eligible drone is dispatched.
-    """
+@app.post("/timeline")
+async def post_timeline(
+    tick: int,
+    kind: str,
+    brain: str = "CLOUD",
+    duration_ms: float = 0.0,
+    payload: str = "{}"
+):
+    """Agent posts structured timeline events."""
+    import json as _json
+    from datetime import datetime
+    from simulation import TimelineEvent
     sim = shared.sim
-
-    # Auto-activate mission so drones actually move
-    if not sim.mission_active:
-        sim.mission_active = True
-        sim.mission_start_time = time.time()
-        sim.log("🔔 Mission auto-activated by voice command.", "INFO")
-
-    asyncio.create_task(_background_voice_command(message))
-    return {"status": "Command received; processing in background"}
-
-
-async def _background_voice_command(message: str):
-    """Parse voice command with LLM, extract coordinates, dispatch nearest drone."""
-    import llm_gateway
-    sim = shared.sim
-
-    sim.log(
-        f"🎙️ VOICE → STAGE 1: BACKGROUND PROCESSING\n"
-        f"   Raw input: '{message}'",
-        "VERBAL"
+    sim._timeline_counter += 1
+    ev = TimelineEvent(
+        id=f"T{sim._timeline_counter:05d}",
+        tick=tick,
+        ts=datetime.utcnow().isoformat(),
+        kind=kind,
+        brain=brain,
+        duration_ms=duration_ms,
+        payload=_json.loads(payload) if payload else {},
     )
+    sim.timeline.append(ev)
+    if len(sim.timeline) > sim._timeline_cap:
+        sim.timeline = sim.timeline[-sim._timeline_cap:]
+    return {"status": "ok", "id": ev.id}
 
+
+@app.post("/metrics/planning-latency")
+async def record_planning_latency(ms: float):
+    shared.sim.metrics.record_planning_latency(ms)
+    return {"status": "ok"}
+
+
+@app.get("/brain/status")
+async def brain_status():
+    return {"mode": shared.sim.brain_mode, "active": shared.sim.brain_active}
+
+
+@app.post("/brain/mode")
+async def set_brain_mode(mode: str):
+    valid = {"AUTO", "CLOUD", "EDGE", "RULES"}
+    if mode.upper() not in valid:
+        return {"error": f"mode must be one of {sorted(valid)}"}
+    shared.sim.brain_mode = mode.upper()
+    shared.sim.log(f"🧠 BRAIN mode set to {mode.upper()} by operator", "INFO")
+    return {"status": "ok", "mode": shared.sim.brain_mode}
+
+
+@app.post("/radio-intel")
+async def radio_intel(lang: str, text: str):
+    """
+    Field responder relays natural-language survivor intel.
+    Translates + grounds asynchronously; returns lead_id immediately.
+    """
+    sim = shared.sim
+    sim._lead_counter += 1
+    lead_id = f"L{sim._lead_counter:04d}"
+    # Store as PENDING_GROUND immediately so frontend can show it
+    from simulation import Lead
+    lead = Lead(
+        id=lead_id,
+        tick=sim.tick_count,
+        lang=lang,
+        raw=text,
+        english="",
+        x=None,
+        y=None,
+        urgency="STABLE",
+        status="PENDING_GROUND",
+    )
+    sim.leads.append(lead)
+    asyncio.create_task(_background_ground_lead(lead_id, lang, text))
+    return {"status": "received", "lead_id": lead_id}
+
+
+async def _background_ground_lead(lead_id: str, lang: str, text: str):
+    """Ground the lead asynchronously and update shared state."""
+    import radio as radio_mod
+    sim = shared.sim
+    lead = next((l for l in sim.leads if l.id == lead_id), None)
+    if lead is None:
+        return
     try:
-        parse_prompt = (
-            f"You are a rescue dispatcher AI. The operator said: '{message}'.\n"
-            "Extract the target grid coordinates.\n"
-            "Grid: 20 wide (x: 0-19), 15 tall (y: 0-14).\n"
-            "\n"
-            "COORDINATE FORMAT RULES — apply in order:\n"
-            "1. PRIMARY: 'X and Y' → first number=X, second=Y\n"
-            "   '0 and 10' → [0,10]  |  '10 and 0' → [10,0]\n"
-            "2. 'grid N' (N is 0-299): x = N % 20, y = N // 20\n"
-            "3. '(X,Y)' or 'X,Y' or 'X Y' (two numbers): map to [X, Y]\n"
-            "4. Vague ('middle', 'sector', 'north'): infer best [x, y]\n"
-            "\n"
-            "If coordinates found: return JSON {\"target\": [x, y], \"reason\": \"brief explanation\"}\n"
-            "If no coordinates: return {}"
+        result = await asyncio.to_thread(radio_mod.translate_and_ground, lang, text)
+        lead.english = result["english"]
+        lead.x = result["x"]
+        lead.y = result["y"]
+        lead.urgency = result["urgency"]
+        lead.status = result["status"]
+        sim.log(
+            f"📻 RADIO INTEL [{lead_id}] [{lang}] → {result['status']}: "
+            f"'{result['english']}' @ ({result['x']},{result['y']}) [{result['urgency']}]",
+            "AI"
         )
-        p_resp = await asyncio.wait_for(
-            asyncio.to_thread(
-                llm_gateway.completion,
-                messages=[{"role": "user", "content": parse_prompt}]
-            ),
-            timeout=30.0,
-        )
-        json_str = p_resp.choices[0].message.content.strip().replace("```json", "").replace("```", "").strip()
-        data = json.loads(json_str)
-
-        if data.get("target"):
-            tx, ty = int(data["target"][0]), int(data["target"][1])
-            tx = max(0, min(sim.zone.width - 1, tx))
-            ty = max(0, min(sim.zone.height - 1, ty))
-
-            # Redirect if target is a hazard cell
-            if sim.is_inaccessible(tx, ty):
-                accessible = sim.get_unscanned_cells()
-                if accessible:
-                    nearest_safe = min(accessible, key=lambda c: chebyshev(c[0], c[1], tx, ty))
-                    old_tx, old_ty = tx, ty
-                    tx, ty = nearest_safe[0], nearest_safe[1]
-                    sim.log(f"⚠️ ({old_tx},{old_ty}) is a hazard — redirecting to ({tx},{ty}).", "WARN")
-
-            reason = data.get("reason", "Voice instruction")
-            sim.log(
-                f"🧠 VOICE → STAGE 1 RESULT: Parsed '{message}'\n"
-                f"   → Target: ({tx},{ty}) | Reason: {reason}",
-                "AI"
-            )
-            _dispatch_drone_to_target(sim, tx, ty, reason, source_drone=None, label="VOICE")
-        else:
-            sim.log(f"⚠️ VOICE: No coordinates found in: '{message}'", "WARN")
-
     except Exception as e:
-        sim.log(f"❌ VOICE COMMAND ERROR: {type(e).__name__}: {e}", "AI")
+        lead.status = "UNGROUNDED"
+        print(f"[RADIO] Grounding error for {lead_id}: {e}", file=sys.stderr)
+
+
+@app.get("/export-mission")
+async def export_mission():
+    """Return path and size of latest mission JSONL report."""
+    reports_dir = Path(__file__).parent.parent / "mission_reports"
+    if not reports_dir.exists():
+        return {"status": "no_reports", "path": None}
+    files = sorted(reports_dir.glob("*.jsonl"))
+    if not files:
+        return {"status": "no_reports", "path": None}
+    latest = files[-1]
+    return {"status": "ok", "path": str(latest), "size_bytes": latest.stat().st_size}
+
+
+@app.get("/missions/current/export")
+async def export_current_mission():
+    """Download the current mission JSONL tick log."""
+    from pathlib import Path
+    from fastapi.responses import FileResponse
+    reports_dir = Path(__file__).parent.parent / "mission_reports"
+    files = sorted(reports_dir.glob("*.jsonl")) if reports_dir.exists() else []
+    if not files:
+        return {"error": "No mission reports available"}
+    latest = files[-1]
+    return FileResponse(
+        path=str(latest),
+        media_type="application/jsonlines",
+        filename=latest.name,
+    )
 
 
 # ─── MCP Tools ────────────────────────────────────────────────────────────────

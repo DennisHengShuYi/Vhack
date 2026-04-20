@@ -6,6 +6,20 @@ A decentralised swarm intelligence simulation where **SENTINEL**, an LLM-based A
 
 ---
 
+## 🔗 Important Links
+- 🎥 **Video Pitch** — [Watch Here](https://drive.google.com/file/d/1Ze4XMRp9NOvSKgYNoyDbC4k5IU-W0Bdh/view?usp=sharing)
+- 📄 **RescueSwarm Documentation** — [View Documentation](https://www.notion.so/RESCUESWARM-Autonomous-Drone-Swarm-System-Documentation-3282193af50f81ada411d46badc34219)
+- 🎤 **Pitch Deck** — [View Slides](https://drive.google.com/file/d/1sqGvMVvMpfCLwEWZsxgd7IDP_kBDDr0b/view?usp=sharing)
+---
+
+## 👥 Team Members
+- 👨‍💻 **Dennis** — 3rd Year @ UM  
+- 👨‍💻 **Shao Xian** — 3rd Year @ UM  
+- 👨‍💻 **Zhen Yu** — 3rd Year @ UM  
+- 👨‍💻 **Sean Sean** — 3rd Year @ UM  
+
+---
+
 ## 📋 Table of Contents
 
 - [Project Overview](#-project-overview)
@@ -192,7 +206,7 @@ Vhack/
 ### Step 1 — Clone the Repository
 
 ```bash
-git clone https://github.com/DennisHengShuYi/Vhack.git
+git clone https://github.com/DennisHengShuYi/RescueSwarm.git
 cd Vhack
 ```
 

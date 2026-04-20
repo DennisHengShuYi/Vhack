@@ -212,6 +212,106 @@ SENTINEL uses `AsyncCallbackHandler` to stream LLM tokens to the frontend in rea
 
 Auto-detection priority: if `OPENAI_API_KEY` is set, OpenAI is used. If only `GEMINI_API_KEY` is set, Gemini is used. If neither is set, rule-based fallback only.
 
+### 4.10 Drone Discovery Mechanism
+
+Drone discovery operates across **three distinct layers**, executed at different points in the system lifecycle. The agent **never hard-codes drone IDs or tool names** — everything is discovered dynamically.
+
+---
+
+#### Layer 1 — MCP Tool Discovery (Agent Startup)
+
+When the agent process starts, it performs an MCP protocol handshake with the backend:
+
+```python
+# agent/agent.py
+tools = await load_mcp_tools(session)
+```
+
+`load_mcp_tools()` (from `langchain-mcp-adapters`) sends the standard MCP `tools/list` message over the stdio channel. The FastMCP server responds with the full schema of all registered tools — their names, parameter types, and descriptions. The agent then wraps these into LangChain-compatible tool objects and passes them to the LangGraph ReAct agent.
+
+This means:
+- If a new MCP tool is added to `mcp_tools.py`, the agent **automatically gains access to it** on next startup — no agent code change needed.
+- The agent prints the discovered tool list to stderr on startup for verification:
+  ```
+  Discovered Tools: ['list_drones', 'get_status', 'get_grid_state', ...]
+  ```
+
+---
+
+#### Layer 2 — Runtime Fleet Discovery (During Mission)
+
+Once inside the mission loop, the agent discovers *which drones currently exist* by calling the `list_drones()` MCP tool:
+
+```python
+# agent/agent.py — used in _recall_all_drones()
+drones_result = await session.call_tool("list_drones", {})
+raw = drones_result.content[0].text  # → "Active drones: ALPHA-1, ALPHA-2, ..."
+drone_ids = [d.strip() for d in raw.replace("Active drones:", "").split(",")]
+```
+
+The main planning loop uses `get_idle_drones()` which internally iterates `sim.drones.items()` on the backend — always reflecting the live, current set of connected drones.
+
+**Key constraint**: `list_drones()` and `get_idle_drones()` only return drones where `is_active = True`. A drone that has not yet reached its `join_tick` is invisible to the agent — it cannot be commanded until the heartbeat protocol brings it online.
+
+---
+
+#### Layer 3 — Heartbeat Protocol (Staggered Drone Activation)
+
+Drones do not all connect to the swarm simultaneously. The `simulate_heartbeats()` method is called on every simulation tick and activates drones one by one based on their pre-assigned `join_tick`:
+
+```python
+# simulation.py — called every tick
+JOIN_TICKS = [0, 4, 7, 10, 13]  # assigned at SimulationState init
+
+# Per drone per tick:
+if not drone.is_active and self.tick_count >= drone.join_tick:
+    drone.is_active = True
+    drone.status = "IDLE"
+    drone.status_label = "STANDBY"
+    self.log(f"📡 HEARTBEAT: {d_id} joined the swarm mesh network...")
+```
+
+| Drone | Joins at Tick | Approximate Wall-Clock Time |
+|---|---|---|
+| ALPHA-1 | 0 | Mission start (0s) |
+| ALPHA-2 | 4 | ~2.8s after start |
+| ALPHA-3 | 7 | ~4.9s after start |
+| ALPHA-4 | 10 | ~7.0s after start |
+| ALPHA-5 | 13 | ~9.1s after start |
+
+*(Each tick is 0.7 seconds)*
+
+A drone is also **removed from active status** (goes offline) if its battery drops to 0%:
+```python
+if drone.is_active and drone.battery <= 0:
+    drone.is_active = False
+    drone.status = "OFFLINE"
+```
+
+**Effect on the agent**: On the very first planning tick, only ALPHA-1 is visible. Subsequent ticks reveal more drones. SENTINEL adapts its plan to each wave of newly available drones without any hard-coded timing — it simply queries `get_idle_drones()` each tick and acts on whoever is there.
+
+---
+
+#### Discovery Flow Summary
+
+```
+Agent Startup
+    │
+    ▼
+load_mcp_tools(session)         ← MCP tools/list handshake
+    │   Discovers 12 tools dynamically
+    ▼
+Mission Loop (every tick)
+    │
+    ├─ get_idle_drones()         ← Queries sim.drones for active, idle drones
+    │       │
+    │       └─ simulate_heartbeats() activates drones at join_tick 0,4,7,10,13
+    │
+    ├─ [LLM / rule-based] assigns zones
+    │
+    └─ list_drones()             ← Used at mission end to recall all active drones
+```
+
 ---
 
 ## 5. MCP Tool Surface
