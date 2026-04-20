@@ -21,7 +21,8 @@ import {
   X,
   Mic,
   Radio,
-  GitBranch
+  GitBranch,
+  Upload
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import Map3D from './components/Map3D';
@@ -242,6 +243,8 @@ export default function App() {
   const [highlightedVictim, setHighlightedVictim] = useState<{ x: number; y: number } | null>(null);
   const [missionComplete, setMissionComplete] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [isImportingMap, setIsImportingMap] = useState(false);
+  const [importedMapBackgroundUrl, setImportedMapBackgroundUrl] = useState<string | null>(null);
   const [historyView, setHistoryView] = useState<'list' | 'detail' | 'replay'>('list');
   const [selectedMissionId, setSelectedMissionId] = useState<string | null>(null);
   const [selectedMissionIndex, _setSelectedMissionIndex] = useState(0);
@@ -254,8 +257,18 @@ export default function App() {
 
   const logEndRef = useRef<HTMLDivElement>(null);
   const logScrollRef = useRef<HTMLDivElement>(null);
+  const mapImportInputRef = useRef<HTMLInputElement>(null);
   const [userScrolledUp, setUserScrolledUp] = useState(false);
   const recognitionRef = useRef<any>(null);
+
+  // Release browser object URLs when replaced/unmounted.
+  useEffect(() => {
+    return () => {
+      if (importedMapBackgroundUrl) {
+        URL.revokeObjectURL(importedMapBackgroundUrl);
+      }
+    };
+  }, [importedMapBackgroundUrl]);
 
   // Victim popup handling + auto-switch to VICTIMS tab on detection
   useEffect(() => {
@@ -481,6 +494,52 @@ export default function App() {
     await fetch(`${API_BASE}/reset?num_victims=${victimCount}`, { method: 'POST' });
     setActiveDroneId(null);
     setIsTalking(null);
+    setImportedMapBackgroundUrl(null);
+  };
+
+  const triggerMapImport = () => {
+    mapImportInputRef.current?.click();
+  };
+
+  const handleMapImport = async (event: any) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setIsImportingMap(true);
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      form.append('num_victims', String(victimCount));
+
+      const resp = await fetch(`${API_BASE}/import-map`, {
+        method: 'POST',
+        body: form,
+      });
+
+      const payload = await resp.json();
+      if (!resp.ok) {
+        throw new Error(payload?.detail ?? payload?.status ?? 'Map import failed');
+      }
+
+      const previewUrl = URL.createObjectURL(file);
+
+      if (payload?.state) {
+        setState(payload.state);
+        setIsLoading(false);
+        setConnectionStatus('connected');
+      }
+      setImportedMapBackgroundUrl(previewUrl);
+      setActiveDroneId(null);
+      setHighlightedVictim(null);
+      setMissionComplete(false);
+    } catch (err: any) {
+      window.alert(`Map import failed: ${err?.message ?? 'Unknown error'}`);
+    } finally {
+      if (mapImportInputRef.current) {
+        mapImportInputRef.current.value = '';
+      }
+      setIsImportingMap(false);
+    }
   };
 
   const respondToVictim = async (droneId: string) => {
@@ -563,6 +622,22 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           >
             <RefreshCcw size={13} /> RESET
           </button>
+
+          <button
+            className="cyber-button amber map-import-btn"
+            onClick={triggerMapImport}
+            disabled={stats.mission_active || isImportingMap}
+            title="Import real-world map image"
+          >
+            <Upload size={13} /> {isImportingMap ? 'IMPORTING…' : 'IMPORT MAP'}
+          </button>
+          <input
+            ref={mapImportInputRef}
+            type="file"
+            accept="image/*"
+            style={{ display: 'none' }}
+            onChange={handleMapImport}
+          />
 
           <div className="header-divider" />
 
@@ -695,7 +770,15 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
               />
             </div>
           ) : (
-            <div className="grid-container">
+            <div
+              className={`grid-container${importedMapBackgroundUrl ? ' map-imported' : ''}`}
+              style={importedMapBackgroundUrl ? {
+                backgroundImage: `linear-gradient(rgba(5, 5, 8, 0.06), rgba(5, 5, 8, 0.06)), url(${importedMapBackgroundUrl})`,
+                backgroundSize: '100% 100%',
+                backgroundPosition: 'center',
+                backgroundRepeat: 'no-repeat',
+              } : undefined}
+            >
               {Array.from({ length: GRID_W * GRID_H }).map((_, i) => {
                 const x = i % GRID_W;
                 const y = Math.floor(i / GRID_W);
@@ -1513,6 +1596,27 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           transition: transform 0.8s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.8s ease, border 0.8s ease, clip-path 0.8s ease;
           transform-style: preserve-3d;
         }
+        .grid-container.map-imported {
+          background-color: rgba(255, 255, 255, 0.07);
+          border-color: rgba(0, 243, 255, 0.28);
+          box-shadow: inset 0 0 0 1px rgba(0, 243, 255, 0.14), 0 0 18px rgba(0, 243, 255, 0.12);
+        }
+        .grid-container.map-imported .grid-cell {
+          background: rgba(10, 10, 18, 0.22);
+          border-color: rgba(255, 255, 255, 0.08);
+        }
+        .grid-container.map-imported .grid-cell.city-terrain {
+          background: rgba(138, 138, 122, 0.28);
+        }
+        .grid-container.map-imported .grid-cell.hazard-terrain {
+          background: rgba(122, 46, 34, 0.44);
+        }
+        .grid-container.map-imported .grid-cell.forest-terrain {
+          background: rgba(42, 92, 53, 0.34);
+        }
+        .grid-container.map-imported .grid-cell.lake {
+          background: rgba(30, 80, 140, 0.36);
+        }
 
         .center-map.view-3d {
           perspective: 1200px;
@@ -1768,6 +1872,7 @@ const waitingDrone = drones?.find((d: any) => d.is_waiting_response);
           color: var(--accent-amber); min-width: 26px; text-align: center;
         }
         .reset-btn { display: flex; align-items: center; gap: 5px; }
+        .map-import-btn { display: flex; align-items: center; gap: 5px; }
         .header-divider {
           width: 1px; height: 28px;
           background: rgba(255,255,255,0.08); margin: 0 2px;
