@@ -49,9 +49,11 @@ def _build_summary(mission_id: str, sim, reports_dir: Path) -> dict:
     zone_times: dict = {}
     for zid, zone in sim.zone.zones.items():
         if getattr(zone, "completed_tick", None) is not None and zone.assigned_to:
+            start_t = getattr(zone, "started_tick", 0) or 0
+            duration_ticks = max(1, zone.completed_tick - start_t)
             zone_times[zid] = {
                 "drone": zone.assigned_to,
-                "duration_s": round(zone.completed_tick * 0.7, 1),
+                "duration_s": round(duration_ticks * 0.7, 1),
             }
 
     # Survivor discovery list

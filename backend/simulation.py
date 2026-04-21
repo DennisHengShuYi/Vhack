@@ -178,6 +178,7 @@ class Zone(BaseModel):
     assigned_to: Optional[str] = None
     residual_path: List[List[int]] = []
     completed_tick: Optional[int] = None
+    started_tick: Optional[int] = None
 
 def chebyshev(x1: int, y1: int, x2: int, y2: int) -> int:
     return max(abs(x2 - x1), abs(y2 - y1))
@@ -684,6 +685,7 @@ class SimulationState:
         if zone.status != ZoneStatus.UNSCANNED:
             return False
         zone.status = ZoneStatus.IN_PROGRESS
+        zone.started_tick = self.tick_count
         zone.assigned_to = drone_id
         return True
 
@@ -1181,6 +1183,7 @@ class SimulationState:
             if (s["x"] == drone.x and s["y"] == drone.y
                     and s["found"] and not s["rescued"]):
                 s["rescued"] = True
+                s["rescue_tick"] = self.tick_count
                 self.total_rescued += 1
                 self.metrics.victims_rescued += 1
                 drone.is_waiting_response = False
