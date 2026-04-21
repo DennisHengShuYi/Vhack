@@ -377,7 +377,7 @@ export default function MissionDetailView({ missionId, missionIndex, onBack, onR
         <div style={panel}>
           {panelTitle('#fbbf24', 'Zone Completion Times')}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            {zoneSorted.map(([zid, z], i) => {
+            {zoneSorted.map(([zid, z], _i) => {
               const durPercent = Math.max(10, ((z.duration_s || 0) / maxZoneDuration) * 100);
               const barColor = z.duration_s < 45 ? '#4ade80' : z.duration_s < 90 ? '#fbbf24' : '#f87171';
               const m = Math.floor(z.duration_s / 60), sec = Math.floor(z.duration_s % 60).toString().padStart(2, '0');
