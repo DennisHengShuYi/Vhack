@@ -158,6 +158,8 @@ async def run_simulation_loop():
                     if drone.is_waiting_response:
                         drone.status = "IDLE"
                         drone.status_label = "VICTIM STANDBY"
+                        sim.metrics.init_drone(d_id)
+                        sim.metrics.per_drone[d_id].idle_ticks += 1
                         continue
 
                     # Auto-charge at base (adaptive — charge only to minimum needed)
@@ -215,6 +217,8 @@ async def run_simulation_loop():
 
                         drone.status = "IDLE"
                         drone.status_label = "AWAITING ORDERS"
+                        sim.metrics.init_drone(d_id)
+                        sim.metrics.per_drone[d_id].idle_ticks += 1
                         continue
 
                     # Movement: use path_queue if available, else step toward target_x/y
@@ -279,6 +283,7 @@ async def run_simulation_loop():
                                 s["x"], s["y"] = nx, ny
                                 if (nx, ny) == (base_x, base_y):
                                     s["rescued"] = True
+                                    s["rescue_tick"] = sim.tick_count
                                     drone.is_guiding = False
                                     drone.guiding_victim_id = None
                                     sim.total_rescued += 1
@@ -289,6 +294,9 @@ async def run_simulation_loop():
                     drain = 1.5 if terrain_at == 'forest' else 1.0
                     drone.battery = max(0.0, drone.battery - drain)
                     sim.metrics.battery_consumed_total += drain
+                    sim.metrics.init_drone(d_id)
+                    sim.metrics.per_drone[d_id].battery_used += drain
+                    sim.metrics.per_drone[d_id].cells_moved += 1
                     drone.status = "ON_MISSION"
                     drone.status_label = f"→({tx},{ty})"
 
