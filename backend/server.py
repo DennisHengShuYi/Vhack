@@ -22,12 +22,13 @@ import sys
 import json
 import time
 import threading
+import random
 from contextlib import asynccontextmanager
 from typing import Optional, Any
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastmcp import FastMCP
 from dotenv import load_dotenv
@@ -35,7 +36,22 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 import shared
-from simulation import SimulationState, ZoneStatus, chebyshev, LOW_BATTERY_THRESHOLD, BATTERY_RETURN_RESERVE, GRID_W, GRID_H
+from simulation import (
+    SimulationState,
+    ZoneStatus,
+    chebyshev,
+    LOW_BATTERY_THRESHOLD,
+    BATTERY_RETURN_RESERVE,
+    GRID_W,
+    GRID_H,
+    CONDITION_POOL,
+    CONDITION_TRIAGE,
+)
+
+try:
+    from backend.map_import import image_bytes_to_terrain_grid, summarize_terrain
+except ModuleNotFoundError:
+    from map_import import image_bytes_to_terrain_grid, summarize_terrain
 
 # ─── FastMCP Server ────────────────────────────────────────────────────────────
 mcp = FastMCP("DroneCommandServer")
@@ -341,6 +357,136 @@ from history import router as history_router
 app.include_router(history_router)
 
 
+def _seed_survivors_for_import(sim: SimulationState, num_victims: int) -> None:
+    """Rebuild survivor placement after importing a new terrain layout."""
+    reports = [
+        "Family trapped in a collapsed structure",
+        "Injured person requesting evacuation",
+        "Unconscious civilian detected",
+        "Separated child asking for help",
+        "Elderly survivor needs assistance",
+        "Workers trapped inside debris",
+        "Weak SOS thermal signature",
+        "Survivor with possible leg fracture",
+    ]
+    terrain_weights = {"hazard": 7, "city": 5, "forest": 2, "flat": 1, "lake": 0}
+
+    pool: list[tuple[int, int]] = []
+    for sy in range(sim.zone.height):
+        for sx in range(sim.zone.width):
+            weight = terrain_weights.get(sim.zone.terrain_types[sy][sx], 1)
+            pool.extend([(sx, sy)] * weight)
+
+    random.shuffle(pool)
+    placed: set[tuple[int, int]] = set()
+    selected: list[tuple[int, int]] = []
+    for sx, sy in pool:
+        if (sx, sy) in placed or sim.zone.terrain_types[sy][sx] == "lake":
+            continue
+        selected.append((sx, sy))
+        placed.add((sx, sy))
+        if len(selected) >= num_victims:
+            break
+
+    sim.zone.survivors = []
+    for i, (sx, sy) in enumerate(selected):
+        condition = random.choice(CONDITION_POOL)
+        sim.zone.survivors.append({
+            "x": sx,
+            "y": sy,
+            "report": random.choice(reports),
+            "id": f"V{i + 1:03d}",
+            "found": False,
+            "rescued": False,
+            "heat_intensity": random.randint(80, 98),
+            "condition": condition,
+            "triage_priority": CONDITION_TRIAGE[condition],
+            "notified_rescue": False,
+            "is_mobile": condition in ("MOBILE_HEALTHY", "MINOR_INJURY"),
+        })
+
+
+def _apply_imported_map(sim: SimulationState, terrain_grid: list[list[str]], num_victims: int) -> None:
+    if len(terrain_grid) != GRID_H or any(len(row) != GRID_W for row in terrain_grid):
+        raise ValueError(f"Imported terrain must be {GRID_W}x{GRID_H}")
+
+    sim.zone.terrain_types = terrain_grid
+    sim.zone.scanned_cells = [[False] * GRID_W for _ in range(GRID_H)]
+    sim.zone.hazard_cells = [
+        [terrain_grid[y][x] == "lake" for x in range(GRID_W)]
+        for y in range(GRID_H)
+    ]
+    sim.zone.hazard_cells[0][0] = False
+    sim.zone.terrain_types[0][0] = "flat"
+
+    for zone in sim.zone.zones.values():
+        zone.status = ZoneStatus.UNSCANNED
+        zone.assigned_to = None
+        zone.residual_path = []
+        zone.completed_tick = None
+
+    _seed_survivors_for_import(sim, num_victims)
+
+    spawn_points = sim._sample_accessible_points(len(sim.drones))
+    for i, drone in enumerate(sim.drones.values()):
+        sx, sy = spawn_points[i]
+        drone.x = sx
+        drone.y = sy
+        drone.base_x, drone.base_y = sim.base_station
+        drone.battery = 100.0
+        drone.is_active = False
+        drone.is_charging = False
+        drone.is_waiting_response = False
+        drone.returning_to_base = False
+        drone.mission_complete_rtb = False
+        drone.status = "OFFLINE"
+        drone.status_label = "OFFLINE"
+        drone.target_x = None
+        drone.target_y = None
+        drone.victim_report = None
+        drone.last_thermal_matrix = None
+        drone.last_thermal_scan = None
+        drone.charge_cycles = 0
+        drone.path_history = []
+        drone.is_guiding = False
+        drone.guiding_victim_id = None
+        drone.voice_override = False
+        drone.original_pos = None
+        drone.path_queue = []
+        drone.scanned_grids = 0
+        drone.assigned_zone_id = None
+        drone.pending_zone_id = None
+
+    sim.mission_active = False
+    sim.mission_start_time = None
+    sim.mission_end_time = None
+    sim.total_victims_found = 0
+    sim.total_rescued = 0
+    sim.tick_count = 0
+    sim.mission_log = []
+    sim._log_id = 0
+    sim._replay_buffer = []
+    sim.streaming_text = ""
+    sim.reserved_zones = {}
+    sim.leads = []
+    sim.timeline = []
+    sim._lead_counter = 0
+    sim._timeline_counter = 0
+
+    sim.probability_map = sim._init_probability_map()
+    sim.metrics = type(sim.metrics)(
+        total_scannable_cells=sum(
+            1
+            for y in range(GRID_H)
+            for x in range(GRID_W)
+            if not sim.zone.hazard_cells[y][x]
+        ),
+        total_victims=len(sim.zone.survivors),
+    )
+    for drone_id in sim.drones:
+        sim.metrics.init_drone(drone_id)
+
+
 @app.get("/state")
 async def get_state():
     """Return full simulation state: drones, zone, log, stats."""
@@ -388,6 +534,41 @@ async def reset_mission(num_victims: int = 10):
     shared.sim = SimulationState(num_victims=num_victims)
     shared.sim.log(f"🔄 SIMULATION RESET — New disaster layout with {num_victims} survivors.", "INFO")
     return {"status": "Reset complete", "num_victims": num_victims}
+
+
+@app.post("/import-map")
+async def import_map(file: UploadFile = File(...), num_victims: int = Form(10)):
+    """Import a real-world map image and convert it into a fixed grid terrain map."""
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Please upload an image file.")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    if len(content) > 12 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Image is too large (max 12MB).")
+
+    try:
+        terrain_grid = image_bytes_to_terrain_grid(content)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Unable to parse image: {exc}") from exc
+
+    victims = max(1, min(50, int(num_victims)))
+    sim = SimulationState(num_victims=victims)
+    _apply_imported_map(sim, terrain_grid, victims)
+    shared.sim = sim
+    shared.sim.log(
+        f"🗺️ MAP IMPORTED from '{file.filename or 'upload'}' — grid generated {GRID_W}x{GRID_H}.",
+        "INFO",
+    )
+
+    return {
+        "status": "Map imported",
+        "grid": {"width": GRID_W, "height": GRID_H},
+        "terrain_counts": summarize_terrain(terrain_grid),
+        "state": shared.sim.get_status(),
+    }
 
 
 @app.post("/log")

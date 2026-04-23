@@ -4,7 +4,7 @@ WeightedPlanner — scored rule-based drone assignment.
 Replaces greedy _rule_based_assignments() in agent.py.
 Parses all options from get_idle_drones() poll text — no extra MCP calls.
 
-Score = (zone_score × 6.0) + (1/√transit × 1.5) + (gap_row × 1.0) + (partial × 0.5) + (lead_nearby × 2.0) + (find_nearby × 1.5)
+Score = (utility × 2.2) + (zone_score × 5.0) + (1/√transit × 1.2) + (gap_row × 1.0) + (partial × 0.5) + (lead_nearby × 2.0) + (find_nearby × 1.5)
 """
 import re
 from typing import Optional
@@ -15,7 +15,7 @@ class WeightedPlanner:
     _DRONE_RE = re.compile(r'\[DRONE:\s*(\S+)\]')
     _OPT_RE = re.compile(
         r'Opt\s+\d+:\s*assign_scan_zone\(\"([^\"]+)\",\s*\"([^\"]+)\"\)'
-        r'.*?Score[=:]\s*([\d.]+).*?Transit[=:]\s*(\d+)'
+        r'.*?(?:Utility[=:]\s*([\d.]+).*?)?Score[=:]\s*([\d.]+).*?Transit[=:]\s*(\d+)'
     )
     _RTB_RE = re.compile(r'return_to_base\(\).*?Battery too low', re.IGNORECASE)
     _IDLE_RE = re.compile(r'Idle drones \[([^\]]+)\]')
@@ -59,8 +59,9 @@ class WeightedPlanner:
             if m:
                 current_opts.append({
                     "zone": m.group(2),
-                    "score": float(m.group(3)),
-                    "transit": int(m.group(4)),
+                    "utility": float(m.group(3)) if m.group(3) else 0.0,
+                    "score": float(m.group(4)),
+                    "transit": int(m.group(5)),
                     "gap_row": "[GAP-ROW" in line,
                     "partial": "[PARTIAL-resume]" in line,
                     "rtb": False,
@@ -81,8 +82,9 @@ class WeightedPlanner:
         # while a distant city zone got only +0.25 — city now wins correctly.
         transit_bonus = 1.0 / (max(opt["transit"], 1) ** 0.5)
         return (
-            opt["score"] * 6.0
-            + transit_bonus * 1.5
+            opt.get("utility", 0.0) * 2.2
+            + opt["score"] * 5.0
+            + transit_bonus * 1.2
             + (1.0 if opt["gap_row"] else 0.0)
             + (0.5 if opt["partial"] else 0.0)
             + (2.0 if opt.get("adjacent_to_lead") else 0.0)
