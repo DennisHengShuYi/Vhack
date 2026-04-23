@@ -931,11 +931,32 @@ async def brain_status():
 @app.post("/brain/mode")
 async def set_brain_mode(mode: str):
     valid = {"AUTO", "CLOUD", "EDGE", "RULES"}
-    if mode.upper() not in valid:
+    m = mode.upper()
+    if m not in valid:
         return {"error": f"mode must be one of {sorted(valid)}"}
-    shared.sim.brain_mode = mode.upper()
-    shared.sim.log(f"🧠 BRAIN mode set to {mode.upper()} by operator", "INFO")
-    return {"status": "ok", "mode": shared.sim.brain_mode}
+    shared.sim.brain_mode = m
+    # Optimistically reflect the expected engine in `brain_active` so the UI
+    # flips instantly even if no decision has been made yet. Once the agent
+    # actually runs, it will POST /brain/active and confirm or override.
+    if m in ("CLOUD", "EDGE", "RULES"):
+        shared.sim.brain_active = m
+    # AUTO leaves brain_active alone — agent decides at runtime.
+    shared.sim.log(f"🧠 BRAIN mode set to {m} by operator", "INFO")
+    return {
+        "status": "ok",
+        "mode": shared.sim.brain_mode,
+        "active": shared.sim.brain_active,
+    }
+
+
+@app.post("/brain/active")
+async def set_brain_active(name: str):
+    """Agent reports which engine it just used (CLOUD | EDGE | RULES)."""
+    valid = {"CLOUD", "EDGE", "RULES"}
+    if name.upper() not in valid:
+        return {"error": f"active must be one of {sorted(valid)}"}
+    shared.sim.brain_active = name.upper()
+    return {"status": "ok", "active": shared.sim.brain_active}
 
 
 @app.post("/radio-intel")

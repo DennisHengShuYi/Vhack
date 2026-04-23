@@ -1329,9 +1329,34 @@ class SimulationState:
             if not self.zone.hazard_cells[y][x]
         )
         coverage = 100.0 if accessible_total == 0 else float(round((scanned / accessible_total) * 100))
+
+        # Enrich zones with `score` + `terrain_counts` so the Commander LLM can
+        # distinguish hazard/city/forest/flat zones in its prompt. Without this,
+        # _format_state() falls back to score=0/terrain={} and the Commander
+        # assigns uniform priorities (see docs/search-strategy-regressions.md §3).
+        zone_payload = self.zone.model_dump()
+        zones_out = zone_payload.get("zones", {})
+        for zid, z in self.zone.zones.items():
+            if zid not in zones_out:
+                continue
+            score = sum(
+                self.probability_map[y][x]
+                for y in range(z.sy, z.ey + 1)
+                for x in range(z.sx, z.ex + 1)
+                if not self.is_inaccessible(x, y)
+                and not self.zone.scanned_cells[y][x]
+            )
+            terrain_counts: Dict[str, int] = {}
+            for y in range(z.sy, z.ey + 1):
+                for x in range(z.sx, z.ex + 1):
+                    t = self.zone.terrain_types[y][x]
+                    terrain_counts[t] = terrain_counts.get(t, 0) + 1
+            zones_out[zid]["score"] = round(score, 3)
+            zones_out[zid]["terrain_counts"] = terrain_counts
+
         return {
             "drones": [d.model_dump() for d in self.drones.values()],
-            "zone": self.zone.model_dump(),
+            "zone": zone_payload,
             "log": self.mission_log,
             "base_station": {"x": self.base_station[0], "y": self.base_station[1]},
             "streaming_text": self.streaming_text,

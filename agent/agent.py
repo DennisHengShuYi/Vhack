@@ -52,6 +52,7 @@ class Blackboard:
     tick: int                 # current Orchestrator tick; updated each poll cycle
     zone_claims: dict         # zone_id → ZoneClaim (COMMITTED only, no PENDING)
     lock: asyncio.Lock
+    brain_mode: str = "AUTO"  # AUTO | CLOUD | EDGE | RULES — operator setting
 
 
 # ─── Commander Agent ───────────────────────────────────────────────────────────
@@ -105,6 +106,17 @@ class Commander:
             print(f"[COMMANDER] State fetch failed: {e}", file=sys.stderr)
             return  # keep existing blackboard — stale but valid
 
+        mode = self.blackboard.brain_mode
+        if mode == "RULES":
+            # Rules mode: derive priorities directly from terrain_counts in
+            # /state instead of calling the LLM. Same weights as TERRAIN_SCAN_WEIGHT.
+            self._apply_rules_brief(state, tick)
+            await self._set_active("RULES")
+            await self._broadcast(
+                f"[COMMANDER BRIEF | tick={tick} | {event_type}] Posture={self.blackboard.posture} [RULES]"
+            )
+            return
+
         memory_block = self.memory.to_prompt_block()
         hist_block = f"\n{historical_intel}\n" if historical_intel else ""
         event_line = f"EVENT: {event_type.upper()} at tick {tick}"
@@ -119,6 +131,8 @@ class Commander:
         )
 
         if self.llm is None:
+            self._apply_rules_brief(state, tick)
+            await self._set_active("RULES")
             return
 
         try:
@@ -129,8 +143,11 @@ class Commander:
             text = response.content if hasattr(response, "content") else str(response)
         except Exception as e:
             print(f"[COMMANDER] LLM failed: {e}", file=sys.stderr)
+            self._apply_rules_brief(state, tick)
+            await self._set_active("RULES")
             return
 
+        await self._set_active("CLOUD" if mode != "EDGE" else "EDGE")
         priority_map, posture, urgent_redirect = self._parse_brief(text)
         if priority_map:
             self.blackboard.priority_map = priority_map
@@ -194,6 +211,67 @@ class Commander:
             )
         except Exception:
             pass
+
+    async def _set_active(self, name: str) -> None:
+        """Notify backend which brain actually produced the last decision."""
+        try:
+            await self.http_session.post(
+                f"{self.backend_url}/brain/active", params={"name": name}
+            )
+        except Exception:
+            pass
+
+    def _apply_rules_brief(self, state: dict, tick: int) -> None:
+        """Deterministic Commander brief when LLM is disabled (RULES mode or fallback).
+
+        Uses the enriched terrain_counts on each zone to build a priority_map
+        that matches the intent of the LLM prompt: hazard 10, city 8, forest 5,
+        flat 2. Posture follows battery + lead state.
+        """
+        weights = {"hazard": 10.0, "city": 8.0, "forest": 5.0, "flat": 2.0, "lake": 0.0}
+        zones = state.get("zone", {}).get("zones", {})
+        priority_map: dict[str, float] = {}
+        for zid, z in zones.items():
+            status = str(z.get("status", "")).upper()
+            if "COMPLETE" in status:
+                priority_map[zid] = 0.0
+                continue
+            counts = z.get("terrain_counts", {}) or {}
+            if not counts:
+                priority_map[zid] = round(float(z.get("score", 1.0)) * 10.0, 2)
+                continue
+            total = sum(counts.values()) or 1
+            weighted = sum(weights.get(k, 1.0) * v for k, v in counts.items()) / total
+            priority_map[zid] = round(weighted, 2)
+
+        drones_active = [d for d in state.get("drones", []) if d.get("is_active", True)]
+        avg_bat = (
+            sum(d.get("battery", 100) for d in drones_active) / len(drones_active)
+            if drones_active else 100.0
+        )
+        has_critical_lead = any(
+            l.get("status") in ("GROUNDED", "PENDING_GROUND") and l.get("urgency") == "CRITICAL"
+            for l in state.get("leads", [])
+        )
+        if avg_bat < 40:
+            posture = "RTB_CAUTIOUS"
+        elif has_critical_lead:
+            posture = "LEAD_CHASE"
+        elif state.get("stats", {}).get("coverage_pct", 0) > 50:
+            posture = "CONVERGE"
+        else:
+            posture = "SPREAD"
+
+        urgent = None
+        for l in state.get("leads", []):
+            if l.get("status") in ("GROUNDED", "PENDING_GROUND") and l.get("urgency") == "CRITICAL":
+                urgent = (int(l.get("x", 0)), int(l.get("y", 0)), "CRITICAL lead [rules mode]")
+                break
+
+        self.blackboard.priority_map = priority_map
+        self.blackboard.posture = posture
+        self.blackboard.urgent_redirect = urgent
+        self.blackboard.updated_at_tick = tick
 
     async def _emit_timeline(self, tick: int, event_type: str, posture: str, zone_count: int) -> None:
         try:
@@ -310,8 +388,10 @@ class Pilot:
         drone_data = next((d for d in state.get("drones", []) if d["id"] == self.drone_id), {})
         battery = drone_data.get("battery", 100.0)
 
-        # LLM reasoning or rule-based fallback
-        if self.llm:
+        # LLM reasoning or rule-based fallback — gated on operator brain_mode
+        mode = self.blackboard.brain_mode
+        use_llm = (self.llm is not None) and (mode != "RULES")
+        if use_llm:
             prompt = (
                 f"Drone: {self.drone_id} | Battery: {battery:.0f}% | "
                 f"Posture: {self.blackboard.posture}\n"
@@ -327,11 +407,18 @@ class Pilot:
                 await self._broadcast(
                     f"[PILOT-{self.drone_id}] Reasoning:\n{text}"
                 )
+                await self._set_active("CLOUD" if mode != "EDGE" else "EDGE")
             except Exception as e:
                 print(f"[PILOT-{self.drone_id}] LLM failed, using fallback: {e}", file=sys.stderr)
                 primary, backup = self._fallback_decision(poll_text, taken)
+                await self._set_active("RULES")
         else:
             primary, backup = self._fallback_decision(poll_text, taken)
+            await self._broadcast(
+                f"[SMART-FALLBACK] {self.drone_id} rule-based (mode={mode}): "
+                f"primary={primary}"
+            )
+            await self._set_active("RULES")
 
         if primary == "RTB" or primary is None:
             await self._rtb(state)
@@ -436,6 +523,14 @@ class Pilot:
         try:
             await self.http_session.post(
                 f"{self.backend_url}/log", params={"text": msg, "level": "AI"}
+            )
+        except Exception:
+            pass
+
+    async def _set_active(self, name: str) -> None:
+        try:
+            await self.http_session.post(
+                f"{self.backend_url}/brain/active", params={"name": name}
             )
         except Exception:
             pass
@@ -607,6 +702,13 @@ class AgentOrchestrator:
                     state = await resp.json()
             except Exception:
                 state = {}
+
+            # Mirror operator-set brain_mode into the Blackboard so Commander
+            # and Pilot can gate LLM vs rule-based paths without extra GETs.
+            brain = state.get("brain", {})
+            new_mode = str(brain.get("mode", "AUTO")).upper()
+            if new_mode in ("AUTO", "CLOUD", "EDGE", "RULES"):
+                board.brain_mode = new_mode
 
             if state.get("stats", {}).get("mission_active", False):
                 # Contract checks → fire Commander
