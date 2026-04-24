@@ -7,7 +7,6 @@ A decentralised swarm intelligence simulation where **SENTINEL**, a multi-agent 
 ---
 
 ## 🔗 Important Links
-- 🎥 **Video Pitch** — [Watch Here](https://drive.google.com/file/d/1Ze4XMRp9NOvSKgYNoyDbC4k5IU-W0Bdh/view?usp=sharing)
 - 📄 **RescueSwarm Documentation** — [View Documentation](https://www.notion.so/RESCUESWARM-Autonomous-Drone-Swarm-System-Documentation-3282193af50f81ada411d46badc34219)
 - 🧠 **Agent Architecture Deep-Dive** — [Commander-Pilot System](https://www.notion.so/34b2193af50f81048ea2f2b727a28e14)
 - 🔍 **Search Strategy Deep-Dive** — [How the Swarm Finds Survivors](https://www.notion.so/34b2193af50f8171b667d52d3756ae95)
