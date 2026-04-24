@@ -474,6 +474,7 @@ CI runs all three on every push (`.github/workflows/ci.yml`).
 Full functional and non-functional requirements: [requirements.md](./requirements.md)
 
 Design deep-dives:
+- **[Rescue Swarm System Documentation]([https://www.notion.so/34b2193af50f81048ea2f2b727a28e14](https://www.notion.so/RESCUESWARM-Autonomous-Drone-Swarm-System-Documentation-3282193af50f81ada411d46badc34219))**
 - **[Commander-Pilot Agent Architecture](https://www.notion.so/34b2193af50f81048ea2f2b727a28e14)**
 - **[Search Strategy — How the Swarm Finds Survivors](https://www.notion.so/34b2193af50f8171b667d52d3756ae95)**
 - **[Regression Post-mortem](./docs/search-strategy-regressions.md)**
